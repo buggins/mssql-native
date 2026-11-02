@@ -1,7 +1,7 @@
 /++
 Basic mssql-native usage: connect, run statements with parameters, insert and
 query structs, call a stored procedure, use a prepared statement and a
-transaction.
+transaction, bulk insert.
 
 Run with `dub run :example-basic`. The connection string comes from the
 `MSSQL_CONNECTION` environment variable, in URL style
@@ -75,4 +75,11 @@ void main()
     update.close();
     conn.commit();
     writefln("after the update: total %s", conn.queryValue!Decimal("SELECT SUM(amount) FROM #orders").toFixedString());
+
+    // Bulk insert: many rows at once, as bulk load data
+    auto bulk = conn.bulkInsert("#orders", ["id", "customer_name", "amount"]);
+    foreach (id; 100 .. 10_100)
+        bulk.addRow(id, "bulk customer", Decimal.fromLong(id % 100));
+    writefln("bulk inserted %s rows; now %s orders", bulk.finish(), conn.queryValue!long(
+            "SELECT COUNT(*) FROM #orders"));
 }

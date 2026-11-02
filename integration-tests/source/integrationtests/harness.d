@@ -9,6 +9,7 @@ import core.exception : AssertError;
 import std.stdio : stderr, writefln;
 
 import integrationtests.basic;
+import integrationtests.bulk;
 import integrationtests.highlevel;
 import integrationtests.moretypes;
 import integrationtests.params;
@@ -76,6 +77,10 @@ immutable TestCase[] allTests = [
     TestCase("long (max) values and xml", &testLargeValues, true),
     TestCase("text, ntext, image", &testLegacyTypes, true),
     TestCase("CLR types as bytes", &testClrTypes, true),
+    TestCase("bulk insert: every column type", &testBulkTypes, true),
+    TestCase("bulk insert: errors", &testBulkErrors, true),
+    TestCase("bulk insert: batches, abort, transactions", &testBulkBatches, true),
+    TestCase("bulk insert: structs, options, triggers", &testBulkStructs, true),
 ];
 
 /// Runner identity, for reports.

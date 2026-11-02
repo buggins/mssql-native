@@ -76,13 +76,16 @@ Features:
 - thread mode (blocking sockets) and fiber mode (vibe-core 1.22 to 2.x), chosen
   automatically;
 - a connection pool (sessions reset on reuse), struct mapping (`query!T`,
-  `queryRow!T`, `queryValue!T`, `insert`).
+  `queryRow!T`, `queryValue!T`, `insert`);
+- bulk insert (`bulkInsert`: `INSERT BULK` with bulk load data, as `bcp` and
+  `SqlBulkCopy` do), values sent in each column's exact type, with batches and
+  the `TABLOCK`/`CHECK_CONSTRAINTS`/`FIRE_TRIGGERS`/`KEEP_NULLS` options.
 
 Examples: [`examples/basic`](examples/basic/source/app.d) (`dub run
 :example-basic`) and [`examples/vibe`](examples/vibe/source/app.d) (`dub run
 :example-vibe`); both read the connection string from `MSSQL_CONNECTION`.
 
-Later: bulk insert, the text of CLR types (`hierarchyid`, `geometry`; read as
+Later: the text of CLR types (`hierarchyid`, `geometry`; read as
 bytes now), streaming `(max)` values, a
 [ddbc](https://github.com/buggins/ddbc) driver and a
 [hibernated](https://github.com/buggins/hibernated) dialect, integrated

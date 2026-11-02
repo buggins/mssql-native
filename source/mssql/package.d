@@ -13,6 +13,7 @@ Authors:   Vadim Lopatin
 +/
 module mssql;
 
+public import mssql.bulk : BulkInserter, BulkOptions;
 public import mssql.connection : Connection, IsolationLevel;
 public import mssql.exception;
 public import mssql.params : Parameter;

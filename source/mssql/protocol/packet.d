@@ -129,6 +129,18 @@ final class PacketWriter
         inMessage = false;
     }
 
+    /++
+    Ends the message with the IGNORE flag: the server discards the whole
+    message (what was already sent of it included), e.g. to abort a bulk load.
+    +/
+    void endIgnored() @safe
+    {
+        assert(inMessage, "begin() first");
+        firstStatus |= PacketStatus.ignore;
+        send(true);
+        inMessage = false;
+    }
+
     /// Sends a whole message.
     void message(PacketType messageType, scope const(ubyte)[] data, ubyte status = PacketStatus.normal) @safe
     {

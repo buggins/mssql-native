@@ -8,6 +8,19 @@ All notable changes to mssql-native are documented here. The format follows
 
 ### Added
 
+- Bulk insert (#8): `Connection.bulkInsert` returns a `BulkInserter`
+  (`addRow`, `add` for structs, `finish`, `abort`); `bulkInsert(table,
+  structs)` in one call. It reads the columns' types (`SELECT TOP 0`), sends
+  `INSERT BULK` and the rows as bulk load data, each value converted to its
+  column's exact type with SQL Server's rounding (decimals, money, times,
+  `datetime`, `smalldatetime`) and range checks; `char`/`varchar` in the
+  column's code page (collations from `sp_tablecollations_100`), `xml` as
+  `nvarchar(max)`. `BulkOptions`: batch size, `TABLOCK`, `CHECK_CONSTRAINTS`,
+  `FIRE_TRIGGERS`, `KEEP_NULLS`. A value that doesn't fit is refused before it
+  is sent (the inserter stays usable); server errors fail the batch. About 7×
+  faster than `INSERT ... VALUES` for 100,000 rows.
+- Decimal parameters with an unscaled value within 64 bits are encoded
+  without `BigInt`.
 - More types (#7):
   - `sql_variant`: values read with their base type (`Value.base`); every
     getter and `getVariant` converts the base value;
