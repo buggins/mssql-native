@@ -33,7 +33,7 @@ public import dbwire.tls.transport : TlsOptions;
 /// Library version.
 enum uint mssqlVersionMajor = 0;
 /// ditto
-enum uint mssqlVersionMinor = 0;
+enum uint mssqlVersionMinor = 1;
 /// ditto
 enum uint mssqlVersionPatch = 0;
 
