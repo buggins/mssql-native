@@ -27,7 +27,13 @@ branch, and mention `Closes #N` in the pull request.
 ```sh
 dub build       # library (thread mode, no C dependencies)
 dub test        # unit tests, no server needed
+MSSQL_HOST=localhost:1433 MSSQL_USER=sa MSSQL_PASSWORD=Your_password123 \
+    dub run :integration-tests-phobos     # integration tests, threads
+dub run :integration-tests-vibe           # the same in vibe.d fibers
 ```
+
+Integration tests are written once in `integration-tests/` and run by both
+runners; without `MSSQL_HOST` the tests that need a server are skipped.
 
 ## Code style and checks
 

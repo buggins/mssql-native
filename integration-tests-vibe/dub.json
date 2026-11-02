@@ -1,0 +1,10 @@
+{
+    "name": "integration-tests-vibe",
+    "description": "Runs the mssql-native integration tests inside vibe.d tasks (fiber mode)",
+    "license": "BSL-1.0",
+    "targetType": "executable",
+    "dependencies": {
+        "mssql-native:integration-tests": { "path": "../" },
+        "vibe-core": "~>2.14"
+    }
+}

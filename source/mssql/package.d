@@ -13,6 +13,14 @@ Authors:   Vadim Lopatin
 +/
 module mssql;
 
+public import mssql.connection : Connection;
+public import mssql.exception;
+public import mssql.result : QueryResult;
+public import mssql.settings;
+public import mssql.types.typeinfo : Collation, ColumnInfo, TdsType, TypeInfo;
+public import dbwire.io.backend : IoMode;
+public import dbwire.tls.transport : TlsOptions;
+
 /// Library version.
 enum uint mssqlVersionMajor = 0;
 /// ditto

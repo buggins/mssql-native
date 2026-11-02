@@ -57,6 +57,39 @@ Run lint and format before committing D code. dfmt 0.15.2 mangles lambdas with a
 - SQL Server in Docker: container `ddbc-mssql` (2022, port **11433**, user `sa`, password `MSbbk4k77JKH88g54`); create others with `docker run -d -p <port>:1433 -e ACCEPT_EULA=Y -e MSSQL_PID=Developer -e 'MSSQL_SA_PASSWORD=...' mcr.microsoft.com/mssql/server:<2017|2019|2022>-latest`. `sqlcmd` is inside the 2022 image at `/opt/mssql-tools18/bin/sqlcmd -C` (older images: `/opt/mssql-tools/bin/sqlcmd`).
 - ODBC Driver 18 for SQL Server is installed (handy to compare results, e.g. through ddbc's ODBC driver).
 
+## Layout
+
+```
+source/mssql/
+  package.d            public imports, version constants, mssqlHasVibe
+  connection.d         Connection: connect (failover, PRELOGIN, TLS, LOGIN7), exec, query, ping, close;
+                       the token loop (nextEvent), row reading, ALL_HEADERS, ENVCHANGE handling
+  result.d             QueryResult: rows of the first result set (range or next()), getters
+  settings.d           ConnectionOptions (+ fromDsn sqlserver://, fromParams), HostPort, HostSelection
+  exception.d          ServerException (ServerMessage), dbwire's ClientException/ConnectionException/ProtocolException
+  protocol/            packet.d (PacketWriter, PacketReader), prelogin.d (options, encryption agreement,
+                       PreloginTlsFraming), login.d (LOGIN7), tokens.d (DONE, ERROR/INFO, LOGINACK, ENVCHANGE),
+                       text.d (UTF-16LE)
+  types/               typeinfo.d (TYPE_INFO, COLMETADATA, value framing for every type), values.d (conversions)
+integration-tests/     shared harness (dub subpackage `:integration-tests`): tests in `allTests` (harness.d);
+                       server from MSSQL_HOST, MSSQL_USER, MSSQL_PASSWORD (MSSQL_VERIFY=1: verify certificates)
+integration-tests-phobos/, integration-tests-vibe/   runners (threads; vibe.d tasks, plus vibetests.d)
+```
+
+Run the integration tests with `MSSQL_HOST=localhost:11433 MSSQL_USER=sa MSSQL_PASSWORD=MSbbk4k77JKH88g54 dub run :integration-tests-phobos` (and `:integration-tests-vibe`). Other local servers: containers `mssql-2017` (port 14017) and `mssql-2019` (14019), password `Test_password123`.
+
+## Protocol behaviour learned from the real server
+
+- TDS 7.4 version bytes in LOGIN7: `04 00 00 74`; LOGINACK returns `74 00 00 04` (read big-endian: 0x74000004).
+- PRELOGIN option offsets count from the start of the PRELOGIN data; the server answers with packet type 4. During the TLS handshake it sends PRELOGIN packets (type 0x12).
+- TDS 7.x handshakes negotiate TLS 1.2 even when 1.3 is offered; the client caps at TLS 1.2 (a TLS 1.3 server would send session tickets through the framing).
+- Login-only encryption (both sides ENCRYPT_OFF) doesn't verify the certificate, like SqlClient/ODBC; full encryption verifies unless `trust_server_certificate`.
+- NBCROW: a set bit in the null bitmap means NULL ([MS-TDS] is self-contradictory there).
+- A response may end with DONEPROC (e.g. a batch read as a procedure call: `SELEC 1` gives error 2812); DONEINPROC never ends it.
+- Nullable columns come as INTN/BITN/FLTN with their size; non-null literals as fixed types (INT4, ...).
+- `SET NOCOUNT ON` lasts for the session: DONE tokens then carry no row counts.
+- Errors are collected until the final DONE, then thrown as one `ServerException`, so the stream stays in sync; severity 20+ closes the connection.
+
 ## Conventions
 
 - `@safe` by default; small commented `@trusted` blocks only in I/O and reinterpret-cast hot paths.
