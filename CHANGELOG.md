@@ -4,7 +4,7 @@ All notable changes to mssql-native are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/).
 
-## Unreleased
+## 0.2.0 — 2026-11-02
 
 ### Added
 
@@ -17,7 +17,7 @@ All notable changes to mssql-native are documented here. The format follows
   column's code page (collations from `sp_tablecollations_100`), `xml` as
   `nvarchar(max)`. `BulkOptions`: batch size, `TABLOCK`, `CHECK_CONSTRAINTS`,
   `FIRE_TRIGGERS`, `KEEP_NULLS`. A value that doesn't fit is refused before it
-  is sent (the inserter stays usable); server errors fail the batch. About 7×
+  is sent (the inserter stays usable); server errors fail the batch. About 20×
   faster than `INSERT ... VALUES` for 100,000 rows.
 - Decimal parameters with an unscaled value within 64 bits are encoded
   without `BigInt`.
