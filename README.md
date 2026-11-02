@@ -6,6 +6,22 @@ No ODBC, no FreeTDS, no C libraries at build time.
 
 > **Status: under development.** Nothing is released yet; the plan is tracked
 > in the [roadmap issue](https://github.com/buggins/mssql-native/issues/11).
+> Connecting (TLS, SQL logins), batches and results with integers, `bit`,
+> floats and Unicode strings work; the other types come next.
+
+```d
+import mssql;
+import std.stdio;
+
+auto conn = new Connection(
+    "sqlserver://sa:secret@localhost/master?trust_server_certificate=true");
+scope (exit)
+    conn.close();
+conn.exec("CREATE TABLE #t (id int, name nvarchar(50))");
+conn.exec("INSERT INTO #t VALUES (1, N'one'), (2, N'two')");
+foreach (row; conn.query("SELECT id, name FROM #t ORDER BY id"))
+    writeln(row.getLong(0), " ", row.getString(1));
+```
 
 Planned for the first release (0.1.0):
 

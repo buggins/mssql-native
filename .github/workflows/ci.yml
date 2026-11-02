@@ -46,6 +46,11 @@ jobs:
         run: dub build
       - name: Unit tests
         run: dub test
+      # Without MSSQL_HOST the runners skip the server tests: this checks that they build and run
+      - name: Integration test runners (threads)
+        run: dub run :integration-tests-phobos
+      - name: Integration test runners (vibe.d fibers)
+        run: dub run :integration-tests-vibe
 
   integration:
     name: server (SQL Server ${{ matrix.mssql }})
@@ -85,9 +90,10 @@ jobs:
           docker exec ${{ job.services.mssql.id }} sh -c \
             "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Test_password123 -Q 'SELECT @@VERSION' \
              || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P Test_password123 -Q 'SELECT @@VERSION'"
-      - name: Build
-        run: dub build
-      # Integration tests (thread and fiber runners) come with M1
+      - name: Integration tests (threads)
+        run: dub run :integration-tests-phobos
+      - name: Integration tests (vibe.d fibers)
+        run: dub run :integration-tests-vibe
 
   lint:
     runs-on: ubuntu-latest

@@ -8,6 +8,28 @@ All notable changes to mssql-native are documented here. The format follows
 
 ### Added
 
+- Connecting and the first queries (#2):
+  - TDS 7.4 packets; PRELOGIN with encryption negotiation; TLS through dbwire
+    0.2 — the handshake inside PRELOGIN packets, full encryption, or only the
+    login packet when neither side asks for encryption; encryption is on by
+    default, with certificate verification (`trust_server_certificate` for
+    development servers);
+  - LOGIN7 with SQL Server authentication; LOGINACK, ENVCHANGE (database,
+    language, packet size, collation, transactions), INFO, ERROR, DONE;
+  - `Connection`: `exec` (rows affected), `query` (rows of the first result
+    set, later statements read and discarded), `ping`, `close`; failover over
+    several hosts; connect, send and receive timeouts; thread and fiber (vibe.d)
+    mode; `ConnectionOptions` with `sqlserver://` connection strings;
+  - `QueryResult`: row-by-row reading (input range or `next()`), `getLong`,
+    `getInt`, `getBool`, `getDouble`, `getString`, `getBytes`, `isNull`;
+    integers, `bit`, `real`/`float`, `nvarchar`/`nchar`, `varchar` (UTF-8
+    collations and ASCII); every other type is read (the stream stays in sync)
+    and refused clearly on access until M2;
+  - `ServerException` (number, state, severity, line, procedure, all errors of
+    the statement); a fatal error (severity 20 and above) closes the connection;
+  - unit tests with golden bytes and a replayed session from SQL Server 2022;
+    integration tests against SQL Server 2017, 2019 and 2022 in both I/O modes,
+    run by CI.
 - Repository scaffold (#1): dub package `mssql-native` (module `mssql`) on
   dbwire, CI on Linux, Windows and macOS with DMD and LDC down to frontend
   2.097, a SQL Server service container for integration tests, lint and

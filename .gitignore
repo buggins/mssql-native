@@ -30,3 +30,5 @@ dub.selections.json
 
 # Test executables
 /mssql-native-test-*
+/integration-tests-*/mssql-native_integration-tests-*
+/integration-tests-*/integration-tests-*
