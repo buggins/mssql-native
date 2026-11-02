@@ -30,6 +30,7 @@ import mssql.protocol.packet : PacketReader, PacketStatus, PacketType, PacketWri
     packetHeaderSize;
 import mssql.protocol.prelogin;
 import dbwire.charset.utf16 : encodeUtf16le;
+import mssql.bulk : BulkInserter, BulkOptions;
 import mssql.mapping : RowRange, columnNames, fieldParameters, fieldPositions, quoteIdentifier, readStruct, readValue;
 import mssql.params : Parameter, declarations, numbered, parameters, rewritePlaceholders, withDecimalScale;
 import std.range.primitives : ElementType, isInputRange;
@@ -470,6 +471,52 @@ final class Connection : Poolable
     }
 
     /++
+    Starts a bulk insert into `table` (see `mssql.bulk`): rows added to the
+    returned `BulkInserter` go to the server as bulk load data, much faster
+    than `INSERT` statements for many rows.
+
+    Params:
+        table = the table, as used in SQL (e.g. `dbo.orders`, `#temp`).
+        columns = the columns rows give values for, in order; by default all
+            columns except identity, computed and `timestamp` ones.
+        options = batch size and `INSERT BULK` options.
+    Throws: `ServerException` if the table or a column doesn't exist;
+    `ClientException` for column types that can't be bulk loaded yet.
+    +/
+    BulkInserter bulkInsert(string table, const string[] columns = null, BulkOptions options = BulkOptions.init) @safe
+    {
+        return new BulkInserter(this, table, columns, options);
+    }
+
+    /// A bulk insert of structs `T`: the columns are `T`'s mapped fields (see `mssql.mapping`).
+    BulkInserter bulkInsert(T)(string table, BulkOptions options = BulkOptions.init) if (is(T == struct))
+    {
+        return bulkInsert(table, columnNames!T, options);
+    }
+
+    /++
+    Bulk inserts a range of structs into `table` (see `bulkInsert`).
+
+    Returns: the number of rows inserted.
+    Throws: as `BulkInserter.finish`; on any error the rows of the current batch are discarded.
+    +/
+    ulong bulkInsert(R)(string table, R rows, BulkOptions options = BulkOptions.init)
+            if (isInputRange!R && is(ElementType!R == struct))
+    {
+        auto bulk = bulkInsert!(ElementType!R)(table, options);
+        try
+        {
+            bulk.add(rows);
+            return bulk.finish();
+        }
+        catch (Exception e)
+        {
+            bulk.abort();
+            throw e;
+        }
+    }
+
+    /++
     Prepares `sql` (with `?` placeholders) for repeated execution: the server
     compiles it once (`sp_prepexec` on the first execution, `sp_execute`
     afterwards).
@@ -771,6 +818,36 @@ final class Connection : Poolable
             writer.end();
             beginResponse();
         });
+    }
+
+    // --- bulk load data (mssql.bulk) ---
+
+    /// Starts a bulk load message with its COLMETADATA token.
+    package void beginBulkData(const(ubyte)[] metadata) @safe
+    {
+        startRequest();
+        guarded({ writer.begin(PacketType.bulkLoad, requestStatus()); writer.put(metadata); });
+    }
+
+    /// Adds rows to the bulk load message.
+    package void putBulkData(const(ubyte)[] data) @safe
+    {
+        guarded({ writer.put(data); });
+    }
+
+    /// Ends the bulk load message (DONE) and reads the server's answer.
+    package ulong endBulkData() @safe
+    {
+        static immutable ubyte[13] done = [0xFD, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        guarded({ writer.put(done[]); writer.end(); statusWanted = false; beginResponse(); });
+        return readExecResponse();
+    }
+
+    /// Ends the bulk load message with the IGNORE flag: the server discards it.
+    package void abortBulkData() @safe
+    {
+        guarded({ writer.endIgnored(); statusWanted = false; beginResponse(); });
+        readExecResponse();
     }
 
     /// Checks the connection is ready and marks it busy; reads a late cancel acknowledgement first.

@@ -291,13 +291,27 @@ private Parameter decimalParameter(const Decimal value) @safe
     Decimal d = value.scale < 0 ? value.rescaled(0) : value;
     if (d.scale > 38)
         throw new ClientException("Decimal parameter " ~ value.toString() ~ ": scale above 38");
+    auto p = decimalType(d.scale);
+    // the unscaled value fits in a long: no BigInt needed (the common case)
+    const w = d.unscaled.words;
+    const high = (w[0] >> 63) != 0 ? ulong.max : 0;
+    if (w[1] == high && w[2] == high && w[3] == high)
+    {
+        const v = cast(long) w[0];
+        const magnitude = v < 0 ? -cast(ulong) v : cast(ulong) v;
+        ubyte[] small = new ubyte[17];
+        small[0] = v < 0 ? 0 : 1;
+        foreach (i; 0 .. 8)
+            small[1 + i] = cast(ubyte)(magnitude >> (8 * i));
+        p.data = (() @trusted => cast(immutable(ubyte)[]) small)(); // unique: built here
+        return p;
+    }
     BigInt u = d.unscaled.toBigInt();
     const negative = u < 0;
     if (negative)
         u = -u;
     if (u >= BigInt(10) ^^ 38)
         throw new ClientException("Decimal parameter " ~ value.toString() ~ ": more than 38 digits");
-    auto p = decimalType(d.scale);
     ubyte[] data = new ubyte[17];
     data[0] = negative ? 0 : 1;
     foreach (i; 0 .. 16)

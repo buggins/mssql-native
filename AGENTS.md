@@ -70,6 +70,7 @@ source/mssql/
   prepared.d           PreparedStatement (sp_prepexec / sp_execute / sp_unprepare)
   pool.d               ConnectionPool, PooledConnection (over dbwire PoolCore; resets sessions on reuse)
   mapping.d            struct mapping: @column, @ignore, readValue, RowRange (query!T; insert is in connection.d)
+  bulk.d               BulkInserter, BulkOptions (INSERT BULK + bulk load data, packet type 7)
   settings.d           ConnectionOptions (+ fromDsn sqlserver://, fromAdo Server=...;..., parse, fromParams), HostPort
   exception.d          ServerException (ServerMessage), dbwire's ClientException/ConnectionException/ProtocolException
   protocol/            packet.d (PacketWriter, PacketReader), prelogin.d (options, encryption agreement,
@@ -78,11 +79,12 @@ source/mssql/
                        UTF-16LE comes from dbwire:charset (encodeUtf16le/decodeUtf16le)
   types/               typeinfo.d (TYPE_INFO, COLMETADATA, value framing for every type), values.d (conversions,
                        text, Variant), temporal.d (date/time types), collations.d (collation -> code page,
-                       generated from the server's catalog)
+                       generated from the server's catalog), encode.d (values in a column's exact
+                       type for bulk loads)
 integration-tests/     shared harness (dub subpackage `:integration-tests`): tests in `allTests` (harness.d),
                        basic.d (connections, batches), types.d (every type against the server's own text),
                        params.d (parameters, outputs, procedures, prepared statements),
-                       statements.d (result sets, counts, cancel, transactions, reset);
+                       statements.d (result sets, counts, cancel, transactions, reset), bulk.d (bulk insert);
                        server from MSSQL_HOST, MSSQL_USER, MSSQL_PASSWORD (MSSQL_VERIFY=1: verify certificates)
 integration-tests-phobos/, integration-tests-vibe/   runners (threads, plus threadtests.d; vibe.d tasks, plus vibetests.d)
 integration-tests-vibe1/   the vibe.d runner against vibe-core 1.22.6 (sources shared with integration-tests-vibe)
@@ -113,6 +115,13 @@ Run the integration tests with `MSSQL_HOST=localhost:11433 MSSQL_USER=sa MSSQL_P
 
 - Multi-row `INSERT ... VALUES` (and `UNION`) give each column the union type of its rows: `decimal(38,4)` with `decimal(38,0)` becomes `decimal(38,0)` and the fraction is truncated silently. `insert` therefore sends all decimals of a column with one scale (`withDecimalScale`). SQL Server rejects NaN and infinity in float parameters (error 8023); `Parameter.of` refuses them, and D float fields start as NaN.
 - Mapping templates (`query!T`, `queryRow!T`, `queryValue!T`, `insert`) are member templates overloaded with the variadic `query(sql, args...)`; an explicit `query!Row(sql, args)` picks the mapping one. Like the parameter templates, they infer their attributes.
+
+- Bulk load (packet type 7): `INSERT BULK table (col type, ...)` first, then one message with COLMETADATA, ROW tokens and DONE. The server checks the data only when the message ends. What it insists on:
+  - each column's TYPE_INFO exactly as `SELECT TOP 0` reports it (INT4 for `int NOT NULL`, INTN for nullable) and **the same nullable flag**, else error 4816 "Invalid column type from bcp client";
+  - `char`/`varchar` bytes are read in the code page of the declared `INSERT BULK` column: declare `COLLATE` (names from `[tempdb..]sp_tablecollations_100`);
+  - `xml` data can't be of type xml: send `nvarchar(max)`;
+  - PLP values with their total length fail (error 4804); the "unknown length" form (0xFFFFFFFFFFFFFFFE) works;
+  - ending the message with the IGNORE status (0x02) discards it; the server still answers with a DONE.
 
 ## Types learned from the real server
 
