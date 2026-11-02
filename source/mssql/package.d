@@ -15,7 +15,11 @@ module mssql;
 
 public import mssql.connection : Connection;
 public import mssql.exception;
+public import mssql.params : Parameter;
+public import mssql.prepared : PreparedStatement;
+public import mssql.protocol.rpc : OutputParameter;
 public import mssql.result : QueryResult;
+public import mssql.value : Value;
 public import mssql.settings;
 public import mssql.types.typeinfo : Collation, ColumnInfo, TdsType, TypeInfo;
 public import mssql.types.temporal : Temporal, TemporalKind;

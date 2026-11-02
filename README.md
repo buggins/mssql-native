@@ -6,8 +6,9 @@ No ODBC, no FreeTDS, no C libraries at build time.
 
 > **Status: under development.** Nothing is released yet; the plan is tracked
 > in the [roadmap issue](https://github.com/buggins/mssql-native/issues/11).
-> Connecting (TLS, SQL logins), batches and reading results of all the common
-> types work; parameters come next.
+> Connecting (TLS, SQL logins), queries with parameters, stored procedures,
+> prepared statements and all the common types work; multiple result sets and
+> cancellation come next.
 
 ```d
 import mssql;
@@ -17,10 +18,15 @@ auto conn = new Connection(
     "sqlserver://sa:secret@localhost/master?trust_server_certificate=true");
 scope (exit)
     conn.close();
-conn.exec("CREATE TABLE #t (id int, name nvarchar(50))");
-conn.exec("INSERT INTO #t VALUES (1, N'one'), (2, N'two')");
-foreach (row; conn.query("SELECT id, name FROM #t ORDER BY id"))
-    writeln(row.getLong(0), " ", row.getString(1));
+conn.exec("CREATE TABLE #t (id int, name nvarchar(50), amount decimal(18,2))");
+conn.exec("INSERT INTO #t VALUES (?, ?, ?)", 1, "Grüße", Decimal.fromString("12.50"));
+foreach (row; conn.query("SELECT id, name, amount FROM #t WHERE id > ?", 0))
+    writeln(row.getInt(0), " ", row.getString(1), " ", row.getDecimal(2));
+
+auto insert = conn.prepare("INSERT INTO #t (id, name) VALUES (?, ?)"); // compiled once
+foreach (i; 2 .. 10)
+    insert.exec(i, "row");
+insert.close();
 ```
 
 Planned for the first release (0.1.0):
