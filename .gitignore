@@ -32,3 +32,5 @@ dub.selections.json
 /mssql-native-test-*
 /integration-tests-*/mssql-native_integration-tests-*
 /integration-tests-*/integration-tests-*
+/examples/*/mssql-native_example-*
+/examples/*/example-*

@@ -6,9 +6,8 @@ No ODBC, no FreeTDS, no C libraries at build time.
 
 > **Status: under development.** Nothing is released yet; the plan is tracked
 > in the [roadmap issue](https://github.com/buggins/mssql-native/issues/11).
-> Connecting (TLS, SQL logins), queries with parameters, stored procedures,
-> prepared statements, multiple result sets, cancellation, transactions and all
-> the common types work; the connection pool comes next.
+> Everything planned for 0.1.0 is in place (see below); the first release is
+> being prepared.
 
 ```d
 import mssql;
@@ -29,16 +28,49 @@ foreach (i; 2 .. 10)
 insert.close();
 ```
 
-Planned for the first release (0.1.0):
+Structs map to rows, and a pool shares connections between threads or vibe.d
+tasks:
 
-- SQL Server 2017 and newer, Azure SQL;
+```d
+struct Order
+{
+    int id;
+    @column("customer_name") string customer;
+    Decimal amount;
+    Nullable!DateTime shipped;
+}
+
+auto pool = new ConnectionPool(
+    "Server=db,1433;Database=sales;User Id=app;Password=secret;Max Pool Size=8");
+auto conn = pool.lockConnection(); // returned to the pool at the end of the scope
+conn.insert("orders", [Order(1, "Ann", Decimal.fromString("9.90"))]);
+foreach (o; conn.query!Order("SELECT * FROM orders WHERE amount > ?", 5))
+    writeln(o.customer, " ", o.amount);
+```
+
+Features:
+
+- SQL Server 2017 and newer (tested on 2017, 2019, 2022);
 - TLS (encryption on by default, with certificate verification), SQL logins;
-- queries and parameters (`?` placeholders sent with `sp_executesql`), prepared
-  statements, multiple result sets, cancellation, transactions;
-- the common types: integers, `bit`, `real`/`float`, `decimal`/`numeric`/`money`
-  (as exact decimals), `char`/`varchar`/`nchar`/`nvarchar`, `binary`/`varbinary`,
-  `date`/`time`/`datetime2`/`datetimeoffset`/`datetime`, `uniqueidentifier`;
-- a connection pool and struct mapping.
+- connection strings in URL style (`sqlserver://...`) or ADO style
+  (`Server=...;Database=...`), failover over several hosts;
+- queries with `?` parameters (sent with `sp_executesql`), prepared statements,
+  stored procedures with output parameters and return status, multiple result
+  sets and row counts, cancellation (also from another thread or task),
+  transactions with isolation levels and savepoints;
+- the common types, read and sent exactly: integers, `bit`, `real`/`float`,
+  `decimal`/`numeric`/`money` (as dbwire `Decimal`), `char`/`varchar` (in the
+  collation's code page) and `nchar`/`nvarchar`, `binary`/`varbinary`,
+  `date`/`time`/`datetime2`/`datetimeoffset`/`datetime`/`smalldatetime`,
+  `uniqueidentifier`;
+- thread mode (blocking sockets) and fiber mode (vibe-core 1.22 to 2.x), chosen
+  automatically;
+- a connection pool (sessions reset on reuse), struct mapping (`query!T`,
+  `queryRow!T`, `queryValue!T`, `insert`).
+
+Examples: [`examples/basic`](examples/basic/source/app.d) (`dub run
+:example-basic`) and [`examples/vibe`](examples/vibe/source/app.d) (`dub run
+:example-vibe`); both read the connection string from `MSSQL_CONNECTION`.
 
 Later: `sql_variant`, CLR types (`hierarchyid`, `geometry`), `varchar` in the
 double-byte code pages (Japanese, Chinese, Korean collations), bulk insert, a

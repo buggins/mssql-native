@@ -68,7 +68,9 @@ source/mssql/
   value.d              Value: one value with all getters (cells, output parameters)
   params.d             Parameter (D value -> TYPE_INFO + bytes, typed NULLs, outputs), rewritePlaceholders (? -> @pN)
   prepared.d           PreparedStatement (sp_prepexec / sp_execute / sp_unprepare)
-  settings.d           ConnectionOptions (+ fromDsn sqlserver://, fromParams), HostPort, HostSelection
+  pool.d               ConnectionPool, PooledConnection (over dbwire PoolCore; resets sessions on reuse)
+  mapping.d            struct mapping: @column, @ignore, readValue, RowRange (query!T; insert is in connection.d)
+  settings.d           ConnectionOptions (+ fromDsn sqlserver://, fromAdo Server=...;..., parse, fromParams), HostPort
   exception.d          ServerException (ServerMessage), dbwire's ClientException/ConnectionException/ProtocolException
   protocol/            packet.d (PacketWriter, PacketReader), prelogin.d (options, encryption agreement,
                        PreloginTlsFraming), login.d (LOGIN7), tokens.d (DONE, ERROR/INFO, LOGINACK, ENVCHANGE),
@@ -83,6 +85,8 @@ integration-tests/     shared harness (dub subpackage `:integration-tests`): tes
                        statements.d (result sets, counts, cancel, transactions, reset);
                        server from MSSQL_HOST, MSSQL_USER, MSSQL_PASSWORD (MSSQL_VERIFY=1: verify certificates)
 integration-tests-phobos/, integration-tests-vibe/   runners (threads, plus threadtests.d; vibe.d tasks, plus vibetests.d)
+integration-tests-vibe1/   the vibe.d runner against vibe-core 1.22.6 (sources shared with integration-tests-vibe)
+examples/              basic (`:example-basic`), vibe (`:example-vibe`); read MSSQL_CONNECTION
 ```
 
 Run the integration tests with `MSSQL_HOST=localhost:11433 MSSQL_USER=sa MSSQL_PASSWORD=MSbbk4k77JKH88g54 dub run :integration-tests-phobos` (and `:integration-tests-vibe`). Other local servers: containers `mssql-2017` (port 14017) and `mssql-2019` (14019), password `Test_password123`.
@@ -106,6 +110,9 @@ Run the integration tests with `MSSQL_HOST=localhost:11433 MSSQL_USER=sa MSSQL_P
 - Attention (cancel): an 8-byte packet of type 6 written straight to the transport (dbwire's TLS transport allows it from another thread). The server answers with a DONE with status 0x20, at the end of the response; if the batch had already ended, in a message of its own, which the client reads before anything else (`finishIfFinal`, `startRequest`).
 - `RESETCONNECTION` (status 0x08 on the request's first packet) is acknowledged only by ENVCHANGE 18: no database/language changes are sent, so the client restores the login's values itself. The reset rolls back an open transaction; the request then carries transaction descriptor 0.
 - `master` allows snapshot isolation. Command codes in DONE: SELECT 0xC1, INSERT 0xC3, DELETE 0xC4, UPDATE 0xC5.
+
+- Multi-row `INSERT ... VALUES` (and `UNION`) give each column the union type of its rows: `decimal(38,4)` with `decimal(38,0)` becomes `decimal(38,0)` and the fraction is truncated silently. `insert` therefore sends all decimals of a column with one scale (`withDecimalScale`). SQL Server rejects NaN and infinity in float parameters (error 8023); `Parameter.of` refuses them, and D float fields start as NaN.
+- Mapping templates (`query!T`, `queryRow!T`, `queryValue!T`, `insert`) are member templates overloaded with the variadic `query(sql, args...)`; an explicit `query!Row(sql, args)` picks the mapping one. Like the parameter templates, they infer their attributes.
 
 ## Types learned from the real server
 

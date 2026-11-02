@@ -16,6 +16,8 @@ module mssql;
 public import mssql.connection : Connection, IsolationLevel;
 public import mssql.exception;
 public import mssql.params : Parameter;
+public import mssql.mapping : column, ColumnName, columnNames, ignore, IgnoreField, readValue, RowRange;
+public import mssql.pool : ConnectionPool, PoolOptions, PooledConnection;
 public import mssql.prepared : PreparedStatement;
 public import mssql.protocol.rpc : OutputParameter;
 public import mssql.result : Command, QueryResult, StatementCount;
@@ -25,6 +27,7 @@ public import mssql.types.typeinfo : Collation, ColumnInfo, TdsType, TypeInfo;
 public import mssql.types.temporal : Temporal, TemporalKind;
 public import dbwire.io.backend : IoMode;
 public import dbwire.types.decimal : Decimal, RoundingMode;
+public import std.typecons : Nullable;
 public import dbwire.tls.transport : TlsOptions;
 
 /// Library version.
