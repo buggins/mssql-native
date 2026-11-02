@@ -13,7 +13,7 @@ module mssql.types.typeinfo;
 
 import dbwire.io.buffer : BufferedReader;
 import mssql.exception : ProtocolException;
-import mssql.protocol.text : fromUtf16le;
+import dbwire.charset.utf16 : decodeUtf16le;
 
 /// Data type bytes ([MS-TDS] 2.2.5.4).
 enum TdsType : ubyte
@@ -491,12 +491,12 @@ private Collation readCollation(BufferedReader r) @safe
 
 private string readBVarchar(BufferedReader r) @safe
 {
-    return fromUtf16le(r.readExactBytes(2 * r.readFixed!ubyte()));
+    return decodeUtf16le(r.readExactBytes(2 * r.readFixed!ubyte()));
 }
 
 private string readUsVarchar(BufferedReader r) @safe
 {
-    return fromUtf16le(r.readExactBytes(2 * r.readFixed!ushort()));
+    return decodeUtf16le(r.readExactBytes(2 * r.readFixed!ushort()));
 }
 
 private string hexByte(ubyte b) @safe pure nothrow

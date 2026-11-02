@@ -8,6 +8,22 @@ All notable changes to mssql-native are documented here. The format follows
 
 ### Added
 
+- The basic types (#3), read with their exact values:
+  - `decimal`/`numeric` and `money`/`smallmoney` as dbwire `Decimal`
+    (`getDecimal`); `date`, `time(n)`, `datetime2(n)`, `datetimeoffset(n)`,
+    `datetime`, `smalldatetime` (`getDate`, `getTime`, `getDuration` with
+    100 ns precision, `getDateTime`, `getSysTime`: UTC for types without an
+    offset); `uniqueidentifier` (`getUUID`); `binary`/`varbinary`;
+  - `char`/`varchar`/`text` in the code page of the column collation: the
+    single-byte Windows code pages through dbwire 0.3 `:charset`, and UTF-8;
+    the collation-to-code-page table is generated from SQL Server's catalog;
+  - `getVariant` with each type's natural D type; `getString` with the text SQL
+    Server writes (lossless styles for money, datetime, binary; floats as the
+    shortest text that reads back exactly); numeric getters convert between
+    integers, decimals and floats;
+  - integration tests compare every type's text with the server's `CONVERT`
+    output, every `datetime` millisecond, every scale of the time types, and
+    all bytes of each supported code page.
 - Connecting and the first queries (#2):
   - TDS 7.4 packets; PRELOGIN with encryption negotiation; TLS through dbwire
     0.2 — the handshake inside PRELOGIN packets, full encryption, or only the

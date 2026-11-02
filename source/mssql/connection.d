@@ -27,7 +27,7 @@ import mssql.exception;
 import mssql.protocol.login : Login7, buildLogin7;
 import mssql.protocol.packet : PacketReader, PacketType, PacketWriter, defaultPacketSize;
 import mssql.protocol.prelogin;
-import mssql.protocol.text : toUtf16le;
+import dbwire.charset.utf16 : encodeUtf16le;
 import mssql.protocol.tokens;
 import mssql.result : QueryResult;
 import mssql.settings : ConnectionOptions, HostPort;
@@ -362,7 +362,7 @@ final class Connection
         guarded({
             writer.begin(PacketType.sqlBatch);
             putAllHeaders();
-            writer.put(toUtf16le(sql));
+            writer.put(encodeUtf16le(sql));
             writer.end();
             packets.beginMessage();
         });
@@ -722,10 +722,10 @@ version (unittest)
 @safe unittest
 {
     import std.exception : assertThrown, collectException;
-    import mssql.protocol.text : toUtf16le;
+    import dbwire.charset.utf16 : encodeUtf16le;
 
     ubyte[] loginFailed;
-    const text = toUtf16le("Login failed for user 'sa'.");
+    const text = encodeUtf16le("Login failed for user 'sa'.");
     ubyte[] body = [0x18, 0x48, 0, 0, 1, 14, cast(ubyte)(text.length / 2), 0]; // Msg 18456, state 1, level 14
     body ~= text;
     body ~= [0, 0, 1, 0, 0, 0];
