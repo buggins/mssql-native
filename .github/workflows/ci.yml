@@ -51,6 +51,10 @@ jobs:
         run: dub run :integration-tests-phobos
       - name: Integration test runners (vibe.d fibers)
         run: dub run :integration-tests-vibe
+      - name: Build examples
+        run: |
+          dub build :example-basic
+          dub build :example-vibe
 
   integration:
     name: server (SQL Server ${{ matrix.mssql }})
@@ -94,6 +98,14 @@ jobs:
         run: dub run :integration-tests-phobos
       - name: Integration tests (vibe.d fibers)
         run: dub run :integration-tests-vibe
+      - name: Integration tests (vibe-core 1.x)
+        run: dub run :integration-tests-vibe1
+      - name: Run examples
+        env:
+          MSSQL_CONNECTION: Server=localhost,1433;User Id=sa;Password=Test_password123;TrustServerCertificate=True
+        run: |
+          dub run :example-basic
+          dub run :example-vibe
 
   lint:
     runs-on: ubuntu-latest

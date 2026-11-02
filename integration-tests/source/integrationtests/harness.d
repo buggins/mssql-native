@@ -9,6 +9,7 @@ import core.exception : AssertError;
 import std.stdio : stderr, writefln;
 
 import integrationtests.basic;
+import integrationtests.highlevel;
 import integrationtests.params;
 import integrationtests.statements;
 import integrationtests.types;
@@ -66,6 +67,10 @@ immutable TestCase[] allTests = [
     TestCase("transaction helpers and isolation levels", &testTransactionHelpers, true),
     TestCase("session reset", &testResetSession, true),
     TestCase("fatal errors close the connection", &testFatalError, true),
+    TestCase("URL and ADO connection strings", &testConnectionStrings, true),
+    TestCase("connection pool", &testPool, true),
+    TestCase("struct mapping", &testStructMapping, true),
+    TestCase("inserting many structs", &testInsertMany, true),
 ];
 
 /// Runner identity, for reports.

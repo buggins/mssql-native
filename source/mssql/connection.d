@@ -19,6 +19,7 @@ License:   $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0).
 module mssql.connection;
 
 import dbwire.client.hosts : connectFirst, orderHosts;
+import dbwire.client.pool : Poolable;
 import dbwire.io.backend : IoBackend, backendFor;
 import dbwire.io.buffer : BufferedReader;
 import dbwire.io.transport : Transport;
@@ -29,13 +30,15 @@ import mssql.protocol.packet : PacketReader, PacketStatus, PacketType, PacketWri
     packetHeaderSize;
 import mssql.protocol.prelogin;
 import dbwire.charset.utf16 : encodeUtf16le;
-import mssql.params : Parameter, declarations, numbered, parameters, rewritePlaceholders;
+import mssql.mapping : RowRange, columnNames, fieldParameters, fieldPositions, quoteIdentifier, readStruct, readValue;
+import mssql.params : Parameter, declarations, numbered, parameters, rewritePlaceholders, withDecimalScale;
+import std.range.primitives : ElementType, isInputRange;
 import mssql.prepared : PreparedStatement;
 import mssql.protocol.rpc : OutputParameter, ProcId, putParameter, putProcedure, readReturnValue;
 import mssql.protocol.tokens;
 import mssql.result : QueryResult;
 import mssql.settings : ConnectionOptions, HostPort;
-import mssql.types.typeinfo : Collation, ColumnInfo, ValueRef, readColumnMetadata, readValue;
+import mssql.types.typeinfo : Collation, ColumnInfo, TdsType, ValueRef, readColumnMetadata, readValue;
 
 /++
 One connection to SQL Server.
@@ -44,7 +47,7 @@ One request at a time: a `QueryResult` keeps the connection busy until all its
 rows are read or it is closed. The connection is not thread-safe. Call `close`
 when done; the garbage collector does not close it.
 +/
-final class Connection
+final class Connection : Poolable
 {
     package enum State
     {
@@ -97,10 +100,14 @@ final class Connection
         connect();
     }
 
-    /// Connects with a connection string; see `ConnectionOptions.fromDsn`.
-    this(string dsn) @safe
+    /++
+    Connects with a connection string: URL style (`sqlserver://...`, see
+    `ConnectionOptions.fromDsn`) or ADO style (`Server=...;Database=...`, see
+    `ConnectionOptions.fromAdo`).
+    +/
+    this(string connectionString) @safe
     {
-        this(ConnectionOptions.fromDsn(dsn));
+        this(ConnectionOptions.parse(connectionString));
     }
 
     /// Whether the connection is open (it may be busy).
@@ -309,6 +316,157 @@ final class Connection
             throw new ClientException("No procedure name");
         sendRpc(name, 0, params);
         return new QueryResult(this, null, true);
+    }
+
+    /++
+    Runs a query (with parameters as in `exec`, if any) and returns its rows as
+    structs of type `T` (see `mssql.mapping`): an input range that holds the
+    connection until all rows are read or it is closed.
+
+    Throws: `ClientException` if a field has no column; as `exec`.
+    +/
+    RowRange!T query(T, Args...)(string sql, Args args) if (is(T == struct))
+    {
+        return RowRange!T(run(sql, args));
+    }
+
+    /++
+    The first row of a query as a `T` (see `query!T`); the other rows are discarded.
+
+    Throws: `ClientException` if there is no row or a field has no column; as `exec`.
+    +/
+    T queryRow(T, Args...)(string sql, Args args) if (is(T == struct))
+    {
+        auto result = run(sql, args);
+        scope (exit)
+            result.close();
+        const positions = fieldPositions!T(result);
+        if (result.empty)
+            throw new ClientException("The query returned no rows");
+        return readStruct!T(result, positions);
+    }
+
+    /++
+    The first column of the first row of a query, as a `T` (any field type of
+    `mssql.mapping`; `Nullable!T` to tell NULL apart), e.g.
+    `queryValue!long("SELECT COUNT(*) FROM t")`.
+
+    Throws: `ClientException` if there is no row, or the value can't be
+    converted; as `exec`.
+    +/
+    T queryValue(T, Args...)(string sql, Args args)
+    {
+        auto result = run(sql, args);
+        scope (exit)
+            result.close();
+        if (result.empty || result.columns.length == 0)
+            throw new ClientException("The query returned no value");
+        return readValue!T(result[0]);
+    }
+
+    /++
+    Inserts structs as rows of `table`: one column per mapped field (see
+    `mssql.mapping`). Rows go in `INSERT ... VALUES` statements of up to 1000
+    rows (and 2000 parameters); when there are several statements and no
+    transaction is open, they run in a transaction of their own, so either all
+    rows are inserted or none.
+
+    `table` is used as given (e.g. `dbo.orders` or `[order details]`).
+
+    Returns: the number of rows inserted.
+    Throws: `ServerException` if the server refuses a row; `ClientException`
+    for a value that can't be sent.
+    +/
+    ulong insert(R)(string table, R rows) if (isInputRange!R && is(ElementType!R == struct))
+    {
+        import std.array : join;
+
+        alias E = ElementType!R;
+        enum columns = columnNames!E;
+        static assert(columns.length > 0, E.stringof ~ " has no mapped fields");
+        enum perStatement = columns.length >= 2 ? (2000 / columns.length < 1000 ? 2000 / columns.length : 1000) : 1000;
+        string[] quoted;
+        foreach (c; columns)
+            quoted ~= quoteIdentifier(c);
+        const head = "INSERT INTO " ~ table ~ " (" ~ quoted.join(", ") ~ ") VALUES ";
+        string placeholders = "(?";
+        foreach (_; 1 .. columns.length)
+            placeholders ~= ", ?";
+        placeholders ~= ")";
+
+        Parameter[] params;
+        size_t pending;
+        ulong inserted;
+        bool ownTransaction;
+        void flush()
+        {
+            // one decimal scale per column (the column's type is the union of its rows' types)
+            foreach (c; 0 .. columns.length)
+            {
+                ubyte scale;
+                bool decimal;
+                for (size_t i = c; i < params.length; i += columns.length)
+                    if (params[i].type.type == TdsType.decimalN)
+                    {
+                        decimal = true;
+                        if (params[i].type.scale > scale)
+                            scale = params[i].type.scale;
+                    }
+                if (decimal)
+                    for (size_t i = c; i < params.length; i += columns.length)
+                        if (params[i].type.type == TdsType.decimalN)
+                            params[i] = withDecimalScale(params[i], scale);
+            }
+            string sql = head;
+            foreach (i; 0 .. pending)
+                sql ~= (i ? ", " : "") ~ placeholders;
+            inserted += execParams(sql, params);
+            params.length = 0;
+            pending = 0;
+        }
+
+        try
+        {
+            foreach (ref row; rows)
+            {
+                if (pending == perStatement)
+                {
+                    if (!inTransaction && inserted == 0)
+                    {
+                        begin(); // more than one statement: all or nothing
+                        ownTransaction = true;
+                    }
+                    flush();
+                }
+                params ~= fieldParameters(row);
+                pending++;
+            }
+            if (pending)
+                flush();
+            if (ownTransaction)
+                commit();
+        }
+        catch (Exception e)
+        {
+            if (ownTransaction && isOpen && !isBusy && inTransaction)
+                rollback();
+            throw e;
+        }
+        return inserted;
+    }
+
+    /// ditto
+    ulong insert(T)(string table, T row) if (is(T == struct) && !isInputRange!T)
+    {
+        return insert(table, (&row)[0 .. 1]);
+    }
+
+    private QueryResult run(Args...)(string sql, Args args)
+    {
+        static if (Args.length)
+            return queryParams(sql, parameters(args));
+        else
+            return query(sql);
     }
 
     /++

@@ -1,0 +1,9 @@
+{
+    "name": "example-basic",
+    "description": "mssql-native example: connect, parameters, structs, procedures, transactions",
+    "license": "BSL-1.0",
+    "targetType": "executable",
+    "dependencies": {
+        "mssql-native": { "path": "../../" }
+    }
+}

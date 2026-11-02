@@ -8,6 +8,20 @@ All notable changes to mssql-native are documented here. The format follows
 
 ### Added
 
+- High-level API (#6):
+  - `ConnectionPool` and `PooledConnection` over dbwire's `PoolCore`, in
+    thread and fiber mode; a connection handed out again has its session reset
+    with its next request;
+  - ADO-style connection strings (`Server=tcp:db,1433;Database=...;User
+    Id=...;Password=...;TrustServerCertificate=True;Max Pool Size=8`) besides
+    the URL style; `ConnectionOptions.parse` accepts both;
+  - struct mapping (`mssql.mapping`): `query!T`, `queryRow!T`, `queryValue!T`
+    and `insert(table, structs)`, with `@column` and `@ignore`; `insert` sends
+    up to 1000 rows per statement, in a transaction of its own when it needs
+    several statements;
+  - parameters refuse NaN and infinity (SQL Server can't store them);
+  - examples (`:example-basic`, `:example-vibe`), and a runner for the vibe.d
+    tests against vibe-core 1.x (`:integration-tests-vibe1`).
 - Statements in depth (#5):
   - `queryMultiple` and `QueryResult.nextResult`: all result sets of a batch;
     `callProcedure` returns all result sets of the procedure;

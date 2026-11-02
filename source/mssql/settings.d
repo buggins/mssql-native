@@ -1,9 +1,15 @@
 /++
-Connection options, and parsing them from a connection string (DSN).
+Connection options, and parsing them from a connection string in either of
+two forms:
 
-A DSN looks like
-`sqlserver://user:password@host1:1433,host2/database?trust_server_certificate=true`.
-See `ConnectionOptions.fromDsn` for the parameters.
+$(UL
+$(LI URL style (DSN):
+    `sqlserver://user:password@host1:1433,host2/database?trust_server_certificate=true`;
+    see `ConnectionOptions.fromDsn` for the parameters;)
+$(LI ADO style, as .NET and ODBC use:
+    `Server=tcp:db,1433;Database=sales;User Id=app;Password=secret;TrustServerCertificate=True`;
+    see `ConnectionOptions.fromAdo`.)
+)
 
 Copyright: Copyright © 2026, Vadim Lopatin
 License:   $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0).
@@ -121,6 +127,67 @@ struct ConnectionOptions
             options.port = options.hosts[0].port;
         }
         return options;
+    }
+
+    /++
+    Parses an ADO-style connection string (`key=value` pairs separated by `;`,
+    keys case-insensitive; values may be quoted with `"`, `'` or `{}`).
+
+    $(TABLE
+    $(TR $(TH Keys) $(TH Meaning))
+    $(TR $(TD `Server`, `Data Source`, `Address`, `Addr`, `Network Address`)
+        $(TD `host`, `host,port` or `tcp:host,port`; `.` and `(local)` are localhost.
+        Named instances (`host\instance`) need the port given instead.))
+    $(TR $(TD `Failover Partner`) $(TD a second host, tried after the first))
+    $(TR $(TD `Database`, `Initial Catalog`) $(TD the database))
+    $(TR $(TD `User Id`, `UID`, `User`) $(TD the login))
+    $(TR $(TD `Password`, `PWD`) $(TD the password))
+    $(TR $(TD `Encrypt`) $(TD `true`/`yes`/`mandatory` or `false`/`no`/`optional`))
+    $(TR $(TD `TrustServerCertificate`) $(TD don't verify the certificate))
+    $(TR $(TD `HostNameInCertificate`) $(TD the name expected in the certificate))
+    $(TR $(TD `Application Name`, `App`) $(TD the application name))
+    $(TR $(TD `Workstation ID`, `WSID`) $(TD the client's name))
+    $(TR $(TD `Current Language`, `Language`) $(TD the session language))
+    $(TR $(TD `Connect Timeout`, `Connection Timeout`, `Timeout`) $(TD seconds))
+    $(TR $(TD `Command Timeout`) $(TD the receive timeout, seconds; 0: none))
+    $(TR $(TD `Packet Size`) $(TD bytes, 512 to 32767))
+    $(TR $(TD `ApplicationIntent`) $(TD `ReadOnly` or `ReadWrite`))
+    $(TR $(TD `Max Pool Size`, `Connection Lifetime`) $(TD for `ConnectionPool`))
+    )
+
+    `Pooling`, `Min Pool Size`, `Persist Security Info` and
+    `MultiSubnetFailover` are accepted and ignored; `Integrated Security`,
+    `Trusted_Connection` and `MultipleActiveResultSets` only as false.
+
+    Throws: `ClientException` for unknown keys, invalid values and features
+    that are not supported.
+    +/
+    static ConnectionOptions fromAdo(string connectionString) @safe
+    {
+        const parsed = parseAdoString(connectionString);
+        auto options = fromParams(parsed.params);
+        options.hosts = parsed.hosts.dup;
+        if (options.hosts.length == 1)
+        {
+            options.host = options.hosts[0].host;
+            options.port = options.hosts[0].port;
+        }
+        return options;
+    }
+
+    ///
+    @safe unittest
+    {
+        const o = ConnectionOptions.fromAdo("Server=tcp:db1,1433; Initial Catalog=sales; User ID=app;"
+                ~ "Password='it''s;secret'; TrustServerCertificate=True; Application Name={report};");
+        assert(o.host == "db1" && o.port == 1433 && o.database == "sales" && o.user == "app");
+        assert(o.password == "it's;secret" && o.trustServerCertificate && o.appName == "report");
+    }
+
+    /// A connection string in either form: URL style (`sqlserver://...`) or ADO style (`Server=...;...`).
+    static ConnectionOptions parse(string connectionString) @safe
+    {
+        return isUrlConnectionString(connectionString) ? fromDsn(connectionString) : fromAdo(connectionString);
     }
 
     ///
@@ -265,4 +332,331 @@ struct ConnectionOptions
         "sqlserver://h?unknown=1", "sqlserver://h:x", "sqlserver://h?io=threads"
     ])
         assertThrown!ClientException(ConnectionOptions.fromDsn(bad), bad);
+}
+
+/// Whether `s` is a URL-style connection string (`scheme://...`) rather than ADO style.
+bool isUrlConnectionString(string s) @safe pure nothrow
+{
+    import std.string : indexOf;
+
+    const scheme = s.indexOf("://");
+    const equals = s.indexOf('=');
+    return scheme > 0 && (equals < 0 || scheme < equals);
+}
+
+/// An ADO-style connection string as connection parameters (the names of `fromParams`) and hosts.
+struct AdoConnectionString
+{
+    /// Parameters for `ConnectionOptions.fromParams` and `PoolOptions.fromParams` (`pool_*`).
+    string[string] params;
+    /// The server, and its failover partner.
+    HostPort[] hosts;
+}
+
+/++
+Splits an ADO-style connection string and maps its keys (see
+`ConnectionOptions.fromAdo`).
+
+Throws: `ClientException` for syntax errors, unknown keys and unsupported values.
++/
+AdoConnectionString parseAdoString(string connectionString) @safe
+{
+    import std.string : strip, toLower;
+
+    AdoConnectionString result;
+    string server, partner;
+    foreach (pair; splitAdo(connectionString))
+    {
+        const key = normalizeKey(pair[0]);
+        const value = pair[1];
+        string flag()
+        {
+            switch (value.toLower)
+            {
+            case "true":
+            case "yes":
+                return "true";
+            case "false":
+            case "no":
+                return "false";
+            default:
+                throw new ClientException("Invalid value '" ~ value ~ "' for '" ~ pair[0]
+                        ~ "' (true or false expected)");
+            }
+        }
+
+        void onlyFalse()
+        {
+            if (flag() == "true")
+                throw new ClientException("'" ~ pair[0] ~ "=" ~ value ~ "' is not supported");
+        }
+
+        switch (key)
+        {
+        case "server":
+        case "data source":
+        case "address":
+        case "addr":
+        case "network address":
+            server = value;
+            break;
+        case "failover partner":
+            partner = value;
+            break;
+        case "database":
+        case "initial catalog":
+            result.params["database"] = value;
+            break;
+        case "user id":
+        case "uid":
+        case "user":
+            result.params["user"] = value;
+            break;
+        case "password":
+        case "pwd":
+            result.params["password"] = value;
+            break;
+        case "encrypt":
+            switch (value.toLower)
+            {
+            case "mandatory":
+                result.params["encrypt"] = "true";
+                break;
+            case "optional":
+                result.params["encrypt"] = "false";
+                break;
+            case "strict":
+                throw new ClientException("'Encrypt=Strict' (TDS 8.0) is not supported yet");
+            default:
+                result.params["encrypt"] = flag();
+            }
+            break;
+        case "trustservercertificate":
+        case "trust server certificate":
+            result.params["trust_server_certificate"] = flag();
+            break;
+        case "hostnameincertificate":
+        case "host name in certificate":
+            result.params["host_name_in_certificate"] = value;
+            break;
+        case "application name":
+        case "app":
+            result.params["app_name"] = value;
+            break;
+        case "workstation id":
+        case "wsid":
+            result.params["workstation"] = value;
+            break;
+        case "current language":
+        case "language":
+            result.params["language"] = value;
+            break;
+        case "connect timeout":
+        case "connection timeout":
+        case "timeout":
+            result.params["connect_timeout"] = value;
+            break;
+        case "command timeout":
+            result.params["receive_timeout"] = value;
+            break;
+        case "packet size":
+            result.params["packet_size"] = value;
+            break;
+        case "applicationintent":
+        case "application intent":
+            switch (value.toLower)
+            {
+            case "readonly":
+                result.params["read_only"] = "true";
+                break;
+            case "readwrite":
+                result.params["read_only"] = "false";
+                break;
+            default:
+                throw new ClientException(
+                        "Invalid value '" ~ value ~ "' for '" ~ pair[0]
+                        ~ "' (ReadOnly or ReadWrite expected)");
+            }
+            break;
+        case "max pool size":
+            result.params["pool_max"] = value;
+            break;
+        case "connection lifetime":
+        case "load balance timeout":
+            result.params["pool_max_lifetime"] = value;
+            break;
+        case "pooling":
+        case "persist security info":
+        case "persistsecurityinfo":
+        case "multisubnetfailover":
+        case "multi subnet failover":
+            flag(); // valid, ignored
+            break;
+        case "min pool size":
+            break;
+        case "integrated security":
+        case "trusted_connection":
+            if (value.toLower != "sspi")
+                onlyFalse();
+            else
+                throw new ClientException("'" ~ pair[0] ~ "=" ~ value ~ "' is not supported");
+            break;
+        case "multipleactiveresultsets":
+        case "multiple active result sets":
+            onlyFalse();
+            break;
+        default:
+            throw new ClientException("Unknown connection string key '" ~ pair[0] ~ "'");
+        }
+    }
+    if (server.length)
+        result.hosts ~= parseServer(server);
+    if (partner.length)
+        result.hosts ~= parseServer(partner);
+    return result;
+}
+
+///
+@safe unittest
+{
+    import std.exception : assertThrown;
+
+    auto a = parseAdoString("Data Source=(local);Failover Partner=db2,14330;Max Pool Size=4;Pooling=true");
+    assert(a.hosts == [HostPort("localhost"), HostPort("db2", 14_330)] && a.params["pool_max"] == "4");
+    assertThrown!ClientException(parseAdoString("Server=db\\SQLEXPRESS")); // a named instance
+    assertThrown!ClientException(parseAdoString("Server=db;Integrated Security=SSPI"));
+    assertThrown!ClientException(parseAdoString("Server=db;Colour=blue"));
+    assert(parseAdoString("Server=db;Integrated Security=false").hosts == [HostPort("db")]);
+}
+
+/// The `key=value` pairs of an ADO-style connection string, unquoted.
+private string[2][] splitAdo(string s) @safe
+{
+    import std.string : strip;
+
+    string[2][] pairs;
+    size_t i;
+    while (i < s.length)
+    {
+        // key: up to '=' ('==' is a literal '=')
+        string key;
+        while (i < s.length && s[i] != ';')
+        {
+            if (s[i] == '=')
+            {
+                if (i + 1 < s.length && s[i + 1] == '=')
+                {
+                    key ~= '=';
+                    i += 2;
+                    continue;
+                }
+                break;
+            }
+            key ~= s[i++];
+        }
+        key = key.strip;
+        if (i >= s.length || s[i] == ';')
+        {
+            if (key.length)
+                throw new ClientException("Connection string: no value for '" ~ key ~ "'");
+            i++;
+            continue;
+        }
+        i++; // '='
+        while (i < s.length && (s[i] == ' ' || s[i] == '\t'))
+            i++;
+        string value;
+        if (i < s.length && (s[i] == '"' || s[i] == '\'' || s[i] == '{'))
+        {
+            const close = s[i] == '{' ? '}' : s[i];
+            i++;
+            for (;;)
+            {
+                if (i >= s.length)
+                    throw new ClientException("Connection string: unterminated quoted value for '" ~ key ~ "'");
+                if (s[i] == close)
+                {
+                    if (i + 1 < s.length && s[i + 1] == close) // doubled: a literal quote
+                    {
+                        value ~= close;
+                        i += 2;
+                        continue;
+                    }
+                    i++;
+                    break;
+                }
+                value ~= s[i++];
+            }
+            while (i < s.length && (s[i] == ' ' || s[i] == '\t'))
+                i++;
+            if (i < s.length && s[i] != ';')
+                throw new ClientException("Connection string: text after the quoted value of '" ~ key ~ "'");
+        }
+        else
+        {
+            const start = i;
+            while (i < s.length && s[i] != ';')
+                i++;
+            value = s[start .. i].strip;
+        }
+        i++; // ';'
+        if (key.length == 0)
+            throw new ClientException("Connection string: a value without a key");
+        pairs ~= [key, value];
+    }
+    return pairs;
+}
+
+/// A key in lower case with runs of spaces made single.
+private string normalizeKey(string key) @safe pure
+{
+    import std.ascii : isWhite, toLower;
+
+    string k;
+    bool space;
+    foreach (char c; key)
+    {
+        if (isWhite(c))
+        {
+            space = k.length > 0;
+            continue;
+        }
+        if (space)
+            k ~= ' ';
+        space = false;
+        k ~= toLower(c);
+    }
+    return k;
+}
+
+/// `host`, `host,port`, `tcp:host,port`; `.`, `(local)` are localhost.
+private HostPort parseServer(string server) @safe
+{
+    import std.algorithm.searching : findSplit, startsWith;
+    import std.conv : ConvException, to;
+    import std.string : indexOf, strip, toLower;
+
+    string s = server.strip;
+    if (s.toLower.startsWith("tcp:"))
+        s = s[4 .. $];
+    else if (s.toLower.startsWith("np:") || s.toLower.startsWith("lpc:") || s.toLower.startsWith("admin:"))
+        throw new ClientException("Server '" ~ server ~ "': only TCP connections are supported");
+    auto parts = s.findSplit(",");
+    string host = parts[0].strip;
+    ushort port;
+    if (parts[1].length)
+    {
+        try
+            port = parts[2].strip.to!ushort;
+        catch (ConvException)
+            throw new ClientException("Server '" ~ server ~ "': invalid port");
+    }
+    if (host.indexOf('\\') >= 0)
+        throw new ClientException("Server '" ~ server ~ "': named instances are not supported yet "
+                ~ "(they need the SQL Server Browser); give the instance's port instead: host,port");
+    if (host == "." || host.toLower == "(local)" || host.toLower == "(localdb)")
+        host = "localhost";
+    if (host.length == 0)
+        throw new ClientException("Server '" ~ server ~ "': no host");
+    return HostPort(host, port);
 }

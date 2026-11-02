@@ -67,9 +67,9 @@ struct Parameter
     The parameter for `value` (see the module documentation for the types).
     Attributes are inferred: `@safe` except for `Variant`, whose copies are `@system`.
 
-    Throws: `ClientException` for values SQL Server can't hold (a `Decimal`
-    with more than 38 digits or a scale above 38, a `Duration` outside 0 to 24
-    hours, a date before year 1).
+    Throws: `ClientException` for values SQL Server can't hold (NaN and
+    infinity, a `Decimal` with more than 38 digits or a scale above 38, a
+    `Duration` outside 0 to 24 hours, a date before year 1).
     +/
     static Parameter of(T)(T value)
     {
@@ -210,10 +210,18 @@ private Parameter make(T)(T value) @safe
     }
     else static if (isIntegral!U)
         p.data = littleEndian(value, p.type.maxLength);
-    else static if (is(U == float))
-        p.data = ieee(value);
     else static if (isFloatingPoint!U)
-        p.data = ieee(cast(double) value);
+    {
+        import std.math : isFinite;
+
+        if (!isFinite(value))
+            throw new ClientException("SQL Server can't store NaN or infinity (a parameter of type " ~ U.stringof
+                    ~ ")");
+        static if (is(U == float))
+            p.data = ieee(value);
+        else
+            p.data = ieee(cast(double) value);
+    }
     else static if (isSomeString!U || isSomeChar!U)
     {
         import std.conv : to;
@@ -372,6 +380,8 @@ private auto bigUnsigned(ulong value) @safe
     ]);
     assert(Parameter.of(hnsecs(452_961_234_567)).data == [0x87, 0xEE, 0x97, 0x76, 0x69]);
     assertThrown!ClientException(Parameter.of(hours(24)));
+    assertThrown!ClientException(Parameter.of(double.nan));
+    assertThrown!ClientException(Parameter.of(-float.infinity));
     assert(Parameter.of(UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")).data == [
         0xFF, 0x19, 0x96, 0x6F, 0x86, 0x8B, 0x11, 0xD0, 0xB4, 0x2D, 0x00, 0xC0, 0x4F, 0xC9, 0x64, 0xFF
     ]);
@@ -489,6 +499,41 @@ string rewritePlaceholders(string sql, out size_t count) @safe pure
     assert(rewritePlaceholders("SELECT '?', N'it''s ?', [a?]]b], \"c?\" -- ?\n, ? /* ? /* ? */ ? */", n)
             == "SELECT '?', N'it''s ?', [a?]]b], \"c?\" -- ?\n, @p1 /* ? /* ? */ ? */" && n == 1);
     assert(rewritePlaceholders("SELECT 'unterminated ?", n) == "SELECT 'unterminated ?" && n == 0);
+}
+
+/++
+`p` (a `decimal` parameter) with the scale `scale`, which is at least its
+own. Rows of one `INSERT ... VALUES` statement need one scale per column:
+SQL Server gives the column the union type of its rows, and `decimal(38,4)`
+with `decimal(38,0)` becomes `decimal(38,0)`, truncating the fraction.
+
+Throws: `ClientException` if the value then needs more than 38 digits.
++/
+package Parameter withDecimalScale(const Parameter p, ubyte scale) @safe
+{
+    import mssql.types.values : decimalValue;
+
+    if (p.type.scale == scale)
+        return p;
+    if (p.isNull)
+    {
+        auto n = decimalType(scale);
+        n.isNull = true;
+        n.isOutput = p.isOutput;
+        n.name = p.name;
+        return n;
+    }
+    auto r = decimalParameter(decimalValue(p.type, p.data).rescaled(scale));
+    r.isOutput = p.isOutput;
+    r.name = p.name;
+    return r;
+}
+
+@safe unittest
+{
+    const p = withDecimalScale(Parameter.of(Decimal.fromString("-12")), 4);
+    assert(p.declaration == "decimal(38,4)" && p.data[1 .. 4] == [0xC0, 0xD4, 0x01]); // -120000
+    assert(withDecimalScale(Parameter.nullOf!Decimal, 2).declaration == "decimal(38,2)");
 }
 
 /++
