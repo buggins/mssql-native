@@ -4,10 +4,18 @@ A native client for **Microsoft SQL Server** in D: the TDS protocol over TCP,
 written in pure D, for ordinary threads (blocking sockets) and vibe.d fibers.
 No ODBC, no FreeTDS, no C libraries at build time.
 
-> **Status: under development.** Nothing is released yet; the plan is tracked
-> in the [roadmap issue](https://github.com/buggins/mssql-native/issues/11).
-> Everything planned for 0.1.0 is in place (see below); the first release is
-> being prepared.
+> **Status: 0.1.0**, the first release. The API may still change before 1.0;
+> the plan is tracked in the
+> [roadmap issue](https://github.com/buggins/mssql-native/issues/11), changes
+> in the [changelog](CHANGELOG.md).
+
+Add it to your `dub.json`:
+
+```json
+"dependencies": {
+    "mssql-native": "~>0.1.0"
+}
+```
 
 ```d
 import mssql;
