@@ -28,6 +28,9 @@ import mssql.protocol.login : Login7, buildLogin7;
 import mssql.protocol.packet : PacketReader, PacketType, PacketWriter, defaultPacketSize;
 import mssql.protocol.prelogin;
 import dbwire.charset.utf16 : encodeUtf16le;
+import mssql.params : Parameter, declarations, numbered, parameters, rewritePlaceholders;
+import mssql.prepared : PreparedStatement;
+import mssql.protocol.rpc : OutputParameter, ProcId, putParameter, putProcedure, readReturnValue;
 import mssql.protocol.tokens;
 import mssql.result : QueryResult;
 import mssql.settings : ConnectionOptions, HostPort;
@@ -58,6 +61,10 @@ final class Connection
     package BufferedReader reader;
     private ulong transactionDescriptor; // 0 outside transactions (ENVCHANGE begin/commit/rollback)
     private ServerMessage[] errors; // ERROR tokens of the current response
+    package OutputParameter[] responseOutputs; // RETURNVALUE tokens of the current response
+    package bool responseHasStatus; // whether the current response had a RETURNSTATUS
+    package int responseStatus; // its value
+    private bool statusWanted; // the request calls a user's procedure (not sp_executesql, sp_execute, ...)
     private HostPort connectedHost;
     private LoginAck ack;
     private string currentDatabase;
@@ -163,6 +170,35 @@ final class Connection
     ulong exec(string sql) @safe
     {
         sendBatch(sql);
+        return readExecResponse();
+    }
+
+    /++
+    Runs a statement (or batch) with parameters: each `?` placeholder of `sql`
+    takes the next argument, converted as `mssql.params.Parameter.of` does
+    (see `mssql.params` for the types); or pass one `Parameter[]` with all
+    parameters (e.g. built at run time). The statement is sent with
+    `sp_executesql`, so the server can reuse its plan.
+
+    Returns: the number of rows inserted, updated or deleted.
+    Throws: `ClientException` if the number of placeholders and arguments
+    differ, or for a value that can't be sent; `ServerException` if a
+    statement failed.
+    +/
+    ulong exec(Args...)(string sql, Args args) if (Args.length > 0)
+    {
+        return execParams(sql, parameters(args));
+    }
+
+    private ulong execParams(string sql, const Parameter[] params) @safe
+    {
+        sendExecuteSql(sql, params);
+        return readExecResponse();
+    }
+
+    /// Reads a response to its end; returns the rows affected.
+    package ulong readExecResponse() @safe
+    {
         ulong affected;
         ColumnInfo[] columns;
         ubyte[] scratch;
@@ -206,6 +242,58 @@ final class Connection
     {
         sendBatch(sql);
         return new QueryResult(this);
+    }
+
+    /++
+    Runs a query with parameters (see `exec` for the placeholders and types)
+    and returns its rows, as `query(sql)` does. Output parameters
+    (`Parameter.output`) are in the result's `outputs` once all its rows are read.
+
+    Throws: as `exec`.
+    +/
+    QueryResult query(Args...)(string sql, Args args) if (Args.length > 0)
+    {
+        return queryParams(sql, parameters(args));
+    }
+
+    private QueryResult queryParams(string sql, const Parameter[] params) @safe
+    {
+        sendExecuteSql(sql, params);
+        return new QueryResult(this);
+    }
+
+    /++
+    Calls the stored procedure `name` with `args`: values for its parameters
+    in order, or `Parameter`s (`Parameter.of(v).named("@x")` for a named
+    parameter, `Parameter.output`/`outputOf` for an `OUTPUT` parameter), or
+    one `Parameter[]` with all of them.
+
+    Returns: the rows of the procedure's first result set; once they are all
+    read (or the result is closed), its `outputs` and `returnStatus`.
+    Throws: `ServerException` if the procedure failed.
+    +/
+    QueryResult callProcedure(Args...)(string name, Args args)
+    {
+        return callParams(name, parameters(args));
+    }
+
+    private QueryResult callParams(string name, const Parameter[] params) @safe
+    {
+        if (name.length == 0)
+            throw new ClientException("No procedure name");
+        sendRpc(name, 0, params);
+        return new QueryResult(this);
+    }
+
+    /++
+    Prepares `sql` (with `?` placeholders) for repeated execution: the server
+    compiles it once (`sp_prepexec` on the first execution, `sp_execute`
+    afterwards).
+    +/
+    PreparedStatement prepare(string sql) @safe
+    {
+        checkOpen();
+        return new PreparedStatement(this, sql);
     }
 
     /// Checks that the server answers.
@@ -276,7 +364,11 @@ final class Connection
                 skipFeatureExtAck(reader);
                 break;
             case TokenType.returnStatus:
-                reader.readFixed!int();
+                responseStatus = reader.readFixed!int();
+                responseHasStatus = statusWanted;
+                break;
+            case TokenType.returnValue:
+                responseOutputs ~= readReturnValue(reader, options.maxValueLength);
                 break;
             case TokenType.order:
             case TokenType.tabName:
@@ -364,8 +456,52 @@ final class Connection
             putAllHeaders();
             writer.put(encodeUtf16le(sql));
             writer.end();
-            packets.beginMessage();
+            statusWanted = false;
+            beginResponse();
         });
+    }
+
+    private void sendExecuteSql(string sql, const Parameter[] params) @safe
+    {
+        import std.conv : to;
+
+        size_t count;
+        const text = rewritePlaceholders(sql, count);
+        if (count != params.length)
+            throw new ClientException("The statement has " ~ count.to!string ~ " placeholders but "
+                    ~ params.length.to!string ~ " arguments were given");
+        if (params.length == 0)
+            return sendBatch(sql);
+        auto values = numbered(params);
+        sendRpc(null, ProcId.executeSql, [
+            Parameter.of(text), Parameter.of(declarations(values))
+        ] ~ values);
+    }
+
+    /// Sends an RPC request: procedure `name`, or system procedure `id` when `name` is empty.
+    package void sendRpc(string name, ushort id, const Parameter[] params) @safe
+    {
+        checkReady();
+        state = State.busy;
+        guarded({
+            writer.begin(PacketType.rpc);
+            putAllHeaders();
+            putProcedure(writer, name, id);
+            statusWanted = name.length != 0;
+            foreach (ref p; params)
+                putParameter(writer, p, defaultCollation);
+            writer.end();
+            beginResponse();
+        });
+    }
+
+    /// Starts reading a response: per-response state is reset.
+    private void beginResponse() @safe
+    {
+        packets.beginMessage();
+        responseOutputs = null;
+        responseHasStatus = false;
+        responseStatus = 0;
     }
 
     /// ALL_HEADERS with the transaction descriptor header ([MS-TDS] 2.2.5.3).
@@ -378,7 +514,13 @@ final class Connection
         writer.putLE!uint(1); // outstanding requests
     }
 
-    private void checkReady() const @safe
+    package void checkOpen() const @safe
+    {
+        if (state == State.closed)
+            throw new ClientException("The connection is closed");
+    }
+
+    package void checkReady() const @safe
     {
         if (state == State.closed)
             throw new ClientException("The connection is closed");

@@ -64,17 +64,22 @@ source/mssql/
   package.d            public imports, version constants, mssqlHasVibe
   connection.d         Connection: connect (failover, PRELOGIN, TLS, LOGIN7), exec, query, ping, close;
                        the token loop (nextEvent), row reading, ALL_HEADERS, ENVCHANGE handling
-  result.d             QueryResult: rows of the first result set (range or next()), getters
+  result.d             QueryResult: rows of the first result set (range or next()), getters, outputs, returnStatus
+  value.d              Value: one value with all getters (cells, output parameters)
+  params.d             Parameter (D value -> TYPE_INFO + bytes, typed NULLs, outputs), rewritePlaceholders (? -> @pN)
+  prepared.d           PreparedStatement (sp_prepexec / sp_execute / sp_unprepare)
   settings.d           ConnectionOptions (+ fromDsn sqlserver://, fromParams), HostPort, HostSelection
   exception.d          ServerException (ServerMessage), dbwire's ClientException/ConnectionException/ProtocolException
   protocol/            packet.d (PacketWriter, PacketReader), prelogin.d (options, encryption agreement,
-                       PreloginTlsFraming), login.d (LOGIN7), tokens.d (DONE, ERROR/INFO, LOGINACK, ENVCHANGE);
+                       PreloginTlsFraming), login.d (LOGIN7), tokens.d (DONE, ERROR/INFO, LOGINACK, ENVCHANGE),
+                       rpc.d (RPC requests, parameters on the wire, RETURNVALUE, OutputParameter);
                        UTF-16LE comes from dbwire:charset (encodeUtf16le/decodeUtf16le)
   types/               typeinfo.d (TYPE_INFO, COLMETADATA, value framing for every type), values.d (conversions,
                        text, Variant), temporal.d (date/time types), collations.d (collation -> code page,
                        generated from the server's catalog)
 integration-tests/     shared harness (dub subpackage `:integration-tests`): tests in `allTests` (harness.d),
-                       basic.d (connections, batches), types.d (every type against the server's own text);
+                       basic.d (connections, batches), types.d (every type against the server's own text),
+                       params.d (parameters, outputs, procedures, prepared statements);
                        server from MSSQL_HOST, MSSQL_USER, MSSQL_PASSWORD (MSSQL_VERIFY=1: verify certificates)
 integration-tests-phobos/, integration-tests-vibe/   runners (threads; vibe.d tasks, plus vibetests.d)
 ```
@@ -91,6 +96,10 @@ Run the integration tests with `MSSQL_HOST=localhost:11433 MSSQL_USER=sa MSSQL_P
 - A response may end with DONEPROC (e.g. a batch read as a procedure call: `SELEC 1` gives error 2812); DONEINPROC never ends it.
 - Nullable columns come as INTN/BITN/FLTN with their size; non-null literals as fixed types (INT4, ...).
 - `SET NOCOUNT ON` lasts for the session: DONE tokens then carry no row counts.
+
+- RPC: system procedures go by id (`0xFFFF`, then sp_executesql 10, sp_prepexec 13, sp_execute 12, sp_unprepare 15). `sp_executesql`/`sp_execute` also send a RETURNSTATUS (0); it is reported only for `callProcedure`. RETURNVALUE tokens (output parameters) come after the rows, before the final DONEPROC; `sp_prepexec` returns the handle as output ordinal 0.
+- A NULL `nvarchar` parameter can't go into a `varbinary` column (no implicit conversion): binary NULLs need `Parameter.nullOf!(ubyte[])`. A `datetimeoffset` parameter stored in a `datetime2` column keeps its local time (the offset is dropped). A `decimal` OUTPUT parameter comes back with the declared scale.
+- Variadic templates taking parameters must not be marked `@safe` (attribute inference): `Variant` copies are `@system`. A lone `null` argument must not match a `Parameter[]` overload, so `parameters(args)` recognises a single `Parameter[]` itself.
 
 ## Types learned from the real server
 

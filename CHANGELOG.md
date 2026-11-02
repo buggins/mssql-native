@@ -8,6 +8,22 @@ All notable changes to mssql-native are documented here. The format follows
 
 ### Added
 
+- Parameters, stored procedures and prepared statements (#4):
+  - `exec(sql, args...)` and `query(sql, args...)`: `?` placeholders (not in
+    literals, quoted names or comments) become `@p1, @p2, ...`, sent with
+    `sp_executesql` over an RPC request; arguments of every D type of the M2
+    types (`Parameter.of`), typed NULLs (`Nullable!T`, `Parameter.nullOf!T`),
+    `Variant`, or one `Parameter[]` built at run time;
+  - output parameters (`Parameter.output`, `outputOf!T`) and stored procedure
+    calls (`callProcedure`, positional or named parameters); the result's
+    `outputs` and `returnStatus` once its rows are read;
+  - `Connection.prepare` → `PreparedStatement`: `sp_prepexec` on the first
+    execution, `sp_execute` afterwards, prepared again when the parameter types
+    change; `close` releases it (`sp_unprepare`);
+  - `Value`: one value with all the getters (`result[i]`, output parameters);
+  - integration tests: every D type sent and read back, into typed columns,
+    NULLs, placeholders, outputs, procedures, prepared statements,
+    transactions.
 - The basic types (#3), read with their exact values:
   - `decimal`/`numeric` and `money`/`smallmoney` as dbwire `Decimal`
     (`getDecimal`); `date`, `time(n)`, `datetime2(n)`, `datetimeoffset(n)`,

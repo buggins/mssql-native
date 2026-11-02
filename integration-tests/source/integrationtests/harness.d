@@ -9,6 +9,7 @@ import core.exception : AssertError;
 import std.stdio : stderr, writefln;
 
 import integrationtests.basic;
+import integrationtests.params;
 import integrationtests.types;
 import integrationtests.server : serverConfigured;
 
@@ -49,6 +50,15 @@ immutable TestCase[] allTests = [
     TestCase("float and real values", &testFloats, true),
     TestCase("table with every type and NULL rows", &testTableRoundTrip, true),
     TestCase("types not supported yet", &testUnsupportedTypes, true),
+    TestCase("parameter values of every D type", &testParameterValues, true),
+    TestCase("parameters into typed columns", &testParametersIntoColumns, true),
+    TestCase("NULL parameters", &testNullParameters, true),
+    TestCase("placeholders and argument counts", &testPlaceholders, true),
+    TestCase("output parameters", &testOutputParameters, true),
+    TestCase("stored procedures", &testStoredProcedures, true),
+    TestCase("prepared statements", &testPreparedStatements, true),
+    TestCase("parameters in a transaction", &testParametersInTransaction, true),
+    TestCase("Variant and Parameter[] arguments", &testRuntimeParameters, true),
 ];
 
 /// Runner identity, for reports.

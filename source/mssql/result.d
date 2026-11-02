@@ -10,14 +10,15 @@ import mssql.connection : Connection;
 import mssql.exception : ClientException;
 import mssql.protocol.tokens : Done;
 import mssql.types.typeinfo : ColumnInfo, ValueRef, readColumnMetadata;
+import mssql.protocol.rpc : OutputParameter;
 import core.time : Duration;
 import std.datetime.date : Date, DateTime, TimeOfDay;
 import std.datetime.systime : SysTime;
 import std.uuid : UUID;
+import std.typecons : Nullable;
 import std.variant : Variant;
 import dbwire.types.decimal : Decimal;
-import mssql.types.temporal : Temporal, TemporalKind, decodeTemporal;
-import mssql.types.values : decimalValue, floatValue, integerValue, textValue, uuidValue, variantValue;
+import mssql.value : Value;
 
 /++
 The rows of the first result set of a query, read one at a time from the
@@ -49,10 +50,15 @@ final class QueryResult
     private bool finished; // the whole response is read
     private bool positioned; // next() was called
     private ulong rowsRead;
+    private OutputParameter[] outputList;
+    private int statusValue;
+    private bool hasStatus;
+    private void delegate(const(OutputParameter)[] outputs) @safe onFinished; // e.g. a prepared statement's handle
 
-    package this(Connection conn) @safe
+    package this(Connection conn, void delegate(const(OutputParameter)[]) @safe onFinished = null) @safe
     {
         this.conn = conn;
+        this.onFinished = onFinished;
         conn.guarded({ advance(); });
     }
 
@@ -120,180 +126,130 @@ final class QueryResult
         return rowsRead;
     }
 
+    /++
+    The value in `column` of the current row; valid until the result moves to
+    the next row.
+
+    Throws: `ClientException` if there is no current row or no such column.
+    +/
+    Value opIndex(size_t column) @safe
+    {
+        const v = valueRef(column);
+        return Value(columnList[column].type, v.isNull ? null : bytes(v), v.isNull);
+    }
+
     /// Whether the value in `column` is NULL.
     bool isNull(size_t column) @safe
     {
-        return value(column).isNull;
+        return valueRef(column).isNull;
     }
 
-    /++
-    The value in `column` as a `long`: integers and `bit`; decimals and money
-    truncated towards zero.
-
-    Throws: `ClientException` for other types, or if a decimal doesn't fit.
-    +/
+    /// The value in `column`, see `Value.getLong`: integers and `bit`; decimals and money truncated.
     long getLong(size_t column) @safe
     {
-        const v = value(column);
-        return v.isNull ? 0 : integerValue(columnList[column].type, bytes(v));
+        return this[column].getLong();
     }
 
-    /++
-    The value in `column` as an `int` (see `getLong`).
-
-    Throws: `ClientException` for other types, or if the value does not fit.
-    +/
+    /// The value in `column`, see `Value.getInt`.
     int getInt(size_t column) @safe
     {
-        const v = getLong(column);
-        if (v < int.min || v > int.max)
-            throw new ClientException(
-                    "Value " ~ toText(v) ~ " of column '" ~ columnList[column].name
-                    ~ "' does not fit in an int");
-        return cast(int) v;
+        return this[column].getInt();
     }
 
-    /// The value in `column` as a `bool` (see `getLong`: non-zero is true).
+    /// The value in `column`, see `Value.getBool`.
     bool getBool(size_t column) @safe
     {
-        return getLong(column) != 0;
+        return this[column].getBool();
     }
 
-    /++
-    The value in `column` as a `double`: `real`, `float`, integers, decimals and money.
-
-    Throws: `ClientException` for other types.
-    +/
+    /// The value in `column`, see `Value.getDouble`: floats, integers, decimals and money.
     double getDouble(size_t column) @safe
     {
-        const v = value(column);
-        return v.isNull ? 0 : floatValue(columnList[column].type, bytes(v));
+        return this[column].getDouble();
     }
 
-    /++
-    The value in `column` as an exact `Decimal`: `decimal`/`numeric` with their
-    scale, `money`/`smallmoney` with scale 4, integers with scale 0.
-
-    Throws: `ClientException` for other types.
-    +/
+    /// The value in `column`, see `Value.getDecimal`: decimals, money and integers, exactly.
     Decimal getDecimal(size_t column) @safe
     {
-        const v = value(column);
-        return v.isNull ? Decimal.init : decimalValue(columnList[column].type, bytes(v));
+        return this[column].getDecimal();
     }
 
-    /++
-    The value in `column` as text, as SQL Server writes it (see
-    `mssql.types.values.textValue`): strings as they are, numbers in decimal,
-    dates like `2024-01-31 12:34:56.1234567`.
-
-    Throws: `ClientException` for types without a text form yet.
-    +/
+    /// The value in `column`, see `Value.getString`: the text SQL Server writes.
     string getString(size_t column) @safe
     {
-        const v = value(column);
-        return v.isNull ? null : textValue(columnList[column].type, bytes(v));
+        return this[column].getString();
     }
 
-    /// The raw bytes of the value in `column`, as the server sent them (a copy).
+    /// The value in `column`, see `Value.getBytes`: the raw bytes (a copy).
     ubyte[] getBytes(size_t column) @safe
     {
-        const v = value(column);
-        return v.isNull ? null : bytes(v).dup;
+        return this[column].getBytes();
     }
 
-    /++
-    The date of the value in `column`: `date`, `datetime2`, `datetimeoffset`
-    (its local date), `datetime`, `smalldatetime`.
-
-    Throws: `ClientException` for other types.
-    +/
+    /// The value in `column`, see `Value.getDate`.
     Date getDate(size_t column) @safe
     {
-        Temporal t;
-        return temporal(column, t) ? t.date : Date.init;
+        return this[column].getDate();
     }
 
-    /++
-    The time of day of the value in `column`, without the fraction of a second
-    (see `getDuration`): `time`, `datetime2`, `datetimeoffset` (its local
-    time), `datetime`, `smalldatetime`.
-
-    Throws: `ClientException` for other types.
-    +/
+    /// The value in `column`, see `Value.getTime`.
     TimeOfDay getTime(size_t column) @safe
     {
-        Temporal t;
-        return temporal(column, t) ? t.timeOfDay : TimeOfDay.init;
+        return this[column].getTime();
     }
 
-    /++
-    The time of day of the value in `column` as the exact time since midnight
-    (100 ns precision); for the same types as `getTime`.
-
-    Throws: `ClientException` for other types.
-    +/
+    /// The value in `column`, see `Value.getDuration`: time of day, exact.
     Duration getDuration(size_t column) @safe
     {
-        Temporal t;
-        return temporal(column, t) ? t.sinceMidnight : Duration.zero;
+        return this[column].getDuration();
     }
 
-    /++
-    The value in `column` as a `DateTime`, without the fraction of a second:
-    `datetime2`, `datetimeoffset` (its local time), `datetime`,
-    `smalldatetime`, `date` (at midnight).
-
-    Throws: `ClientException` for other types.
-    +/
+    /// The value in `column`, see `Value.getDateTime`.
     DateTime getDateTime(size_t column) @safe
     {
-        Temporal t;
-        if (!temporal(column, t))
-            return DateTime.init;
-        if (t.kind == TemporalKind.time)
-            throw new ClientException("Cannot read a time value as a date and time");
-        return t.dateTime;
+        return this[column].getDateTime();
     }
 
-    /++
-    The value in `column` as an exact `SysTime`: `datetimeoffset` with a time
-    zone of its offset; `datetime2`, `datetime`, `smalldatetime` and `date` (at
-    midnight) taken as UTC, as they have no time zone.
-
-    Throws: `ClientException` for other types.
-    +/
+    /// The value in `column`, see `Value.getSysTime`: exact; UTC for types without an offset.
     SysTime getSysTime(size_t column) @safe
     {
-        Temporal t;
-        if (!temporal(column, t))
-            return SysTime.init;
-        if (t.kind == TemporalKind.time)
-            throw new ClientException("Cannot read a time value as a point in time");
-        return t.sysTime;
+        return this[column].getSysTime();
     }
 
-    /++
-    The `uniqueidentifier` in `column`.
-
-    Throws: `ClientException` for other types.
-    +/
+    /// The value in `column`, see `Value.getUUID`.
     UUID getUUID(size_t column) @safe
     {
-        const v = value(column);
-        return v.isNull ? UUID.init : uuidValue(columnList[column].type, bytes(v));
+        return this[column].getUUID();
+    }
+
+    /// The value in `column`, see `Value.getVariant`: the natural D type.
+    Variant getVariant(size_t column) @safe
+    {
+        return this[column].getVariant();
     }
 
     /++
-    The value in `column` as a `Variant` of its natural D type (see
-    `mssql.types.values.variantValue`); an empty `Variant` for NULL.
+    The output parameters, in their order: values of parameters passed with
+    `Parameter.output`, and of stored procedures' `OUTPUT` parameters.
 
-    Throws: `ClientException` for types that are not supported yet.
+    Throws: `ClientException` until the whole response is read (all rows, or `close`).
     +/
-    Variant getVariant(size_t column) @safe
+    @property const(OutputParameter)[] outputs() const @safe
     {
-        const v = value(column);
-        return v.isNull ? Variant.init : variantValue(columnList[column].type, bytes(v));
+        checkFinished();
+        return outputList;
+    }
+
+    /++
+    The return status of the stored procedure (`RETURN n`); null for queries,
+    which are not procedure calls.
+
+    Throws: `ClientException` until the whole response is read (all rows, or `close`).
+    +/
+    @property Nullable!int returnStatus() const @safe
+    {
+        checkFinished();
+        return hasStatus ? Nullable!int(statusValue) : Nullable!int.init;
     }
 
     /++
@@ -310,7 +266,14 @@ final class QueryResult
             conn.guarded({ advance(); });
     }
 
-    private ValueRef value(size_t column) @safe
+    private void checkFinished() const @safe
+    {
+        if (!finished)
+            throw new ClientException(
+                    "Output parameters and the return status are available after all rows are read or close()");
+    }
+
+    private ValueRef valueRef(size_t column) @safe
     {
         if (!rowReady)
             throw new ClientException("No current row");
@@ -319,16 +282,6 @@ final class QueryResult
                     "Column index " ~ toText(column) ~ " out of range (" ~ toText(
                     values.length) ~ " columns)");
         return values[column];
-    }
-
-    /// Decodes the date/time in `column` into `t`; false for NULL.
-    private bool temporal(size_t column, out Temporal t) @safe
-    {
-        const v = value(column);
-        if (v.isNull)
-            return false;
-        t = decodeTemporal(columnList[column].type, bytes(v));
-        return true;
     }
 
     private const(ubyte)[] bytes(const ValueRef v) const @safe pure nothrow
@@ -376,7 +329,14 @@ final class QueryResult
             if (haveResultSet)
                 rowsEnded = true; // the DONE of the first result set's statement
             if (conn.finishIfFinal(done))
+            {
                 finished = true;
+                outputList = conn.responseOutputs;
+                hasStatus = conn.responseHasStatus;
+                statusValue = conn.responseStatus;
+                if (onFinished !is null)
+                    onFinished(outputList);
+            }
             break;
         }
     }
