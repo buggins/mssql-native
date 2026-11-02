@@ -6,7 +6,7 @@ Guidance for AI coding agents working on **mssql-native**, a native D client for
 
 - **What:** a pure-D client for SQL Server over the **TDS protocol, version 7.4** (TCP, port 1433), for SQL Server 2017+ and Azure SQL, with blocking (thread) and vibe.d (fiber) I/O. dub package `mssql-native`, root module `mssql`.
 - **Repo:** `git@github.com:buggins/mssql-native.git`, default branch `main`. Author Vadim Lopatin (GitHub `buggins`). License BSL-1.0.
-- **Status:** 0.1.0 released on 2026-11-02 (M0–M5: connect, types, parameters, statements, pool and mapping); roadmap issue #11 lists milestones M0–M9 (one issue each). Published on code.dlang.org as `mssql-native`.
+- **Status:** 0.2.0 released on 2026-11-02 (M0–M5 in 0.1.0: connect, types, parameters, statements, pool and mapping; 0.2.0: M6 more types, M7 bulk insert); roadmap issue #11 lists milestones M0–M9 (one issue each). Published on code.dlang.org as `mssql-native`.
 - **Builds on dbwire** (`../dbwire`): `dbwire:types` (exceptions, `Decimal`), `:io` (transports, I/O backends, buffers), `:tls` (OpenSSL loaded at run time), `:client` (DSN, failover, pool core); later `:charset` (code pages) and `:crypto` (NTLM). Anything not protocol-specific is added to dbwire (issue + PR there), not here.
 - **Sibling project:** `../clickhoused` (ClickHouse client): the model for structure, API style, tests and conventions (its `AGENTS.md`).
 - **`PLAN.md` (local and optional):** the design plan is a local, untracked file (excluded through `.git/info/exclude`). If present, read it before design-level changes and keep it up to date; never `git add` it.
