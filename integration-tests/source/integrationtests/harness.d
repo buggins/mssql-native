@@ -10,6 +10,7 @@ import std.stdio : stderr, writefln;
 
 import integrationtests.basic;
 import integrationtests.highlevel;
+import integrationtests.moretypes;
 import integrationtests.params;
 import integrationtests.statements;
 import integrationtests.types;
@@ -51,7 +52,6 @@ immutable TestCase[] allTests = [
     TestCase("typed getters and Variants", &testTypedGetters, true),
     TestCase("float and real values", &testFloats, true),
     TestCase("table with every type and NULL rows", &testTableRoundTrip, true),
-    TestCase("types not supported yet", &testUnsupportedTypes, true),
     TestCase("parameter values of every D type", &testParameterValues, true),
     TestCase("parameters into typed columns", &testParametersIntoColumns, true),
     TestCase("NULL parameters", &testNullParameters, true),
@@ -71,6 +71,11 @@ immutable TestCase[] allTests = [
     TestCase("connection pool", &testPool, true),
     TestCase("struct mapping", &testStructMapping, true),
     TestCase("inserting many structs", &testInsertMany, true),
+    TestCase("sql_variant", &testSqlVariant, true),
+    TestCase("rowversion", &testRowversion, true),
+    TestCase("long (max) values and xml", &testLargeValues, true),
+    TestCase("text, ntext, image", &testLegacyTypes, true),
+    TestCase("CLR types as bytes", &testClrTypes, true),
 ];
 
 /// Runner identity, for reports.

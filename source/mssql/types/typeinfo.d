@@ -62,6 +62,9 @@ enum TdsType : ubyte
     variant = 0x62, /// sql_variant
 }
 
+/// The user type of `timestamp`/`rowversion` columns (sent as `binary(8)`).
+enum uint rowversionUserType = 80;
+
 /// How a type's values are framed.
 enum ValueFormat
 {
@@ -117,10 +120,14 @@ struct TypeInfo
     Collation collation;
     /// UDT type name (e.g. "hierarchyid"), for UDTs.
     string udtName;
+    /// The column's user type (COLMETADATA): 80 for `timestamp`/`rowversion`, 0 for most.
+    uint userType;
 
     /// The SQL Server type name, e.g. `"int"` or `"nvarchar"` (sizes left out).
     @property string name() const @safe pure nothrow
     {
+        if (userType == rowversionUserType && type == TdsType.bigBinary)
+            return "timestamp";
         switch (type)
         {
         case TdsType.intN:
@@ -375,9 +382,10 @@ ColumnInfo[] readColumnMetadata(BufferedReader r) @safe
     auto columns = new ColumnInfo[count];
     foreach (ref c; columns)
     {
-        r.readFixed!uint(); // UserType
+        const userType = r.readFixed!uint();
         c.flags = r.readFixed!ushort();
         c.type = readTypeInfo(r);
+        c.type.userType = userType;
         if (c.type.format == ValueFormat.textPointer)
         {
             // TableName: the parts of the table's name

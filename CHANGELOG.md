@@ -4,6 +4,23 @@ All notable changes to mssql-native are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- More types (#7):
+  - `sql_variant`: values read with their base type (`Value.base`); every
+    getter and `getVariant` converts the base value;
+  - `rowversion`/`timestamp` columns are named `timestamp` and `getLong` gives
+    their counter; `TypeInfo.userType` keeps the column's user type;
+  - `char`/`varchar` in the Japanese, Chinese and Korean collations (code
+    pages 932, 936, 949, 950, from dbwire 0.4);
+  - CLR types (`hierarchyid`, `geometry`, `geography`) are read as bytes;
+    their getters say how to get text (convert in the query);
+  - integration tests for `(max)` values up to 10 MB, `xml`, `text`, `ntext`,
+    `image`, `sql_variant`, `rowversion`, CLR types, and every byte pair of the
+    double-byte code pages.
+
 ## 0.1.0 — 2026-11-02
 
 First release.
