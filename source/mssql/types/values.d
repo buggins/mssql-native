@@ -13,7 +13,7 @@ import dbwire.types.decimal : Decimal;
 import mssql.exception : ClientException;
 import dbwire.charset.utf16 : decodeUtf16le;
 import mssql.types.temporal : TemporalKind, decodeTemporal, isTemporal;
-import mssql.types.typeinfo : TdsType, TypeInfo;
+import mssql.types.typeinfo : Collation, TdsType, TypeInfo, ValueFormat, rowversionUserType;
 
 /// Whether values of type `t` are integers (or `bit`).
 bool isInteger(const ref TypeInfo t) @safe pure nothrow @nogc
@@ -70,12 +70,20 @@ bool isBinary(const ref TypeInfo t) @safe pure nothrow @nogc
 
 /++
 The integer in `bytes`, a value of type `t`. Decimals and money are truncated
-towards zero.
+towards zero; `rowversion` gives its counter.
 
 Throws: `ClientException` for other types, or if a decimal doesn't fit in a `long`.
 +/
 long integerValue(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe
 {
+    if (t.userType == rowversionUserType && bytes.length == 8)
+    {
+        // rowversion: a big-endian counter (CAST(rv AS bigint))
+        ulong v;
+        foreach (b; bytes)
+            v = (v << 8) | b;
+        return cast(long) v;
+    }
     if (isDecimal(t) || isMoney(t))
         return decimalValue(t, bytes).toLong();
     if (!isInteger(t))
@@ -364,7 +372,55 @@ private long littleEndian(scope const(ubyte)[] bytes) @safe pure nothrow @nogc
 
 private ClientException unsupported(const ref TypeInfo t, string target) @safe pure
 {
+    if (t.type == TdsType.udt)
+        return new ClientException("Cannot read a " ~ t.name ~ " value as " ~ target ~ ": read its bytes "
+                ~ "(getBytes), or convert it in the query (e.g. CAST(x AS nvarchar(max)), x.STAsText())");
     return new ClientException("Cannot read a " ~ t.name ~ " value as " ~ target);
+}
+
+/++
+The base type and value of a `sql_variant` value: `bytes` holds the base type,
+the number of property bytes, the properties (precision and scale, scale, or
+collation and maximum length), then the value ([MS-TDS] 2.2.5.5.4).
+
+Throws: `ClientException` if the value is malformed.
++/
+void unwrapVariant(const(ubyte)[] bytes, out TypeInfo inner, out const(ubyte)[] data) @safe
+{
+    if (bytes.length < 2 || bytes.length < 2 + bytes[1])
+        throw new ClientException("Invalid sql_variant value");
+    const props = bytes[2 .. 2 + bytes[1]];
+    data = bytes[2 + bytes[1] .. $];
+    inner.type = cast(TdsType) bytes[0];
+    inner.format = ValueFormat.fixed;
+    inner.maxLength = cast(uint) data.length;
+    switch (inner.type)
+    {
+    case TdsType.decimalN:
+    case TdsType.numericN:
+        if (props.length != 2)
+            throw new ClientException("Invalid sql_variant decimal");
+        inner.precision = props[0];
+        inner.scale = props[1];
+        break;
+    case TdsType.timeN:
+    case TdsType.datetime2N:
+    case TdsType.datetimeOffsetN:
+        if (props.length != 1 || props[0] > 7)
+            throw new ClientException("Invalid sql_variant time");
+        inner.scale = props[0];
+        break;
+    case TdsType.bigVarchar:
+    case TdsType.bigChar:
+    case TdsType.nvarchar:
+    case TdsType.nchar:
+        if (props.length != 7)
+            throw new ClientException("Invalid sql_variant string");
+        inner.collation = Collation.fromBytes(props[0 .. 5]);
+        break;
+    default:
+        break;
+    }
 }
 
 private string hex(uint v) @safe pure
@@ -405,7 +461,9 @@ private string toText(T)(T value) @safe pure
     varchar.collation.flags |= 0x40; // a UTF-8 collation
     assert(textValue(varchar, [0xC3, 0xA9]) == "é");
     varchar.collation = Collation(0x411, 0x0D, 0, 0); // Japanese_CI_AS: code page 932
-    assertThrown!ClientException(textValue(varchar, [0x82, 0xA0]));
+    assert(textValue(varchar, [0x93, 0xFA, 0x96, 0x7B]) == "日本");
+    varchar.collation = Collation(0x439, 0x0D, 2, 0); // Indic_General_100_CI_AS: Unicode only
+    assertThrown!ClientException(textValue(varchar, [0xE9]));
 
     const float8 = TypeInfo(TdsType.floatN, ValueFormat.byteLength, 8);
     assert(floatValue(float8, [0, 0, 0, 0, 0, 0, 0xF8, 0x3F]) == 1.5);

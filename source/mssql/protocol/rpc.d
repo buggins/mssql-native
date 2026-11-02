@@ -150,9 +150,10 @@ OutputParameter readReturnValue(BufferedReader r, size_t maxLength) @safe
     p.ordinal = r.readFixed!ushort();
     p.name = decodeUtf16le(r.readExactBytes(2 * r.readFixed!ubyte()));
     r.readFixed!ubyte(); // status: output parameter (1) or user-defined function result (2)
-    r.readFixed!uint(); // user type
+    const userType = r.readFixed!uint();
     r.readFixed!ushort(); // flags
-    const type = readTypeInfo(r);
+    auto type = readTypeInfo(r);
+    type.userType = userType;
     ubyte[] data;
     const v = readValue(r, type, data, maxLength);
     p.value = Value(type, v.isNull ? null : data, v.isNull);

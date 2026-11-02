@@ -142,7 +142,7 @@ void testTimeScales()
     }
 }
 
-/// `char`/`varchar` in every supported code page: all 255 non-zero bytes decode as the server converts them.
+/// `char`/`varchar` in every supported code page: all bytes and byte pairs decode as the server converts them.
 void testCodePages()
 {
     auto conn = connectToServer();
@@ -173,15 +173,28 @@ void testCodePages()
         enforce(r.getString(0) == r.getString(1), collation ~ ": text differs from the server's");
         enforce(r.getString(2) == r.getString(3), collation ~ ": char(300) differs from the server's");
     }
-    // double-byte code pages: ASCII reads, other text fails with a clear error
-    auto r = conn.query("SELECT CAST('abc' AS varchar(10)) COLLATE Japanese_CI_AS, "
-            ~ "CAST(N'日本' COLLATE Japanese_CI_AS AS varchar(10))");
-    scope (exit)
-        r.close();
-    enforce(!r.empty && r.getString(0) == "abc", "ASCII in code page 932");
-    auto e = collectException!ClientException(r.getString(1));
-    enforce(e !is null && e.msg == "Text in code page 932 (collation LCID 0x411, sort id 0) is not supported; "
-            ~ "use nvarchar or a UTF-8 collation", e is null ? "no error" : e.msg);
+    // double-byte code pages: every lead byte with every non-zero trail byte, as the server converts them
+    string pairs = "0x";
+    foreach (lead; 0x81 .. 0xFF)
+        foreach (trail; 1 .. 256)
+            pairs ~= format("%02X%02X", lead, trail);
+    foreach (collation; [
+        "Japanese_CI_AS", "Chinese_PRC_CI_AS", "Korean_Wansung_CI_AS",
+        "Chinese_Taiwan_Stroke_CI_AS"
+    ])
+    {
+        conn.exec("CREATE TABLE #cjk (v varchar(max) COLLATE " ~ collation ~ ")");
+        scope (exit)
+            conn.exec("DROP TABLE #cjk");
+        conn.exec("INSERT INTO #cjk VALUES (CAST(" ~ pairs ~ " AS varbinary(max)))");
+        auto r = conn.query("SELECT v, CONVERT(nvarchar(max), v) FROM #cjk");
+        scope (exit)
+            r.close();
+        enforce(r.next() && r.getString(0) == r.getString(1), collation ~ ": text differs from the server's");
+    }
+    auto r = conn.query("SELECT CAST(N'日本語' COLLATE Japanese_CI_AS AS varchar(10)), "
+            ~ "CAST(N'한국어' COLLATE Korean_Wansung_CI_AS AS varchar(10))");
+    enforce(r.next() && r.getString(0) == "日本語" && r.getString(1) == "한국어", "Japanese and Korean text");
     r.close();
     if (major >= 15) // UTF-8 collations: SQL Server 2019 and later
     {
@@ -297,21 +310,4 @@ void testTableRoundTrip()
     foreach (i, c; cases)
         enforce(r.isNull(1 + 2 * i), c.type ~ " NULL");
     enforce(!r.next(), "two rows");
-}
-
-/// Types that can't be read yet fail clearly, and the other columns still read.
-void testUnsupportedTypes()
-{
-    auto conn = connectToServer();
-    scope (exit)
-        conn.close();
-    auto r = conn.query("SELECT CAST(1 AS sql_variant) AS v, hierarchyid::Parse('/1/') AS h, 7 AS after");
-    scope (exit)
-        r.close();
-    enforce(!r.empty && r.getLong(2) == 7, "the value after them");
-    auto e = collectException!ClientException(r.getString(0));
-    enforce(e !is null && e.msg == "Cannot read a sql_variant value as text", e is null ? "no error" : e.msg);
-    e = collectException!ClientException(r.getString(1));
-    enforce(e !is null && e.msg == "Cannot read a hierarchyid value as text", e is null ? "no error" : e.msg);
-    enforce(r.getBytes(1).length > 0, "raw bytes of a hierarchyid");
 }

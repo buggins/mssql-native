@@ -15,8 +15,9 @@ import std.variant : Variant;
 import dbwire.types.decimal : Decimal;
 import mssql.exception : ClientException;
 import mssql.types.temporal : Temporal, TemporalKind, decodeTemporal;
-import mssql.types.typeinfo : TypeInfo;
-import mssql.types.values : decimalValue, floatValue, integerValue, textValue, uuidValue, variantValue;
+import mssql.types.typeinfo : TdsType, TypeInfo;
+import mssql.types.values : decimalValue, floatValue, integerValue, textValue, unwrapVariant, uuidValue,
+    variantValue;
 
 /++
 A value of type `type` in its wire form. The getters convert it; a NULL gives
@@ -42,7 +43,7 @@ struct Value
     +/
     long getLong() const @safe
     {
-        return isNull ? 0 : integerValue(type, bytes);
+        return isNull ? 0 : integerValue(base.type, base.bytes);
     }
 
     /++
@@ -73,7 +74,7 @@ struct Value
     +/
     double getDouble() const @safe
     {
-        return isNull ? 0 : floatValue(type, bytes);
+        return isNull ? 0 : floatValue(base.type, base.bytes);
     }
 
     /++
@@ -84,7 +85,7 @@ struct Value
     +/
     Decimal getDecimal() const @safe
     {
-        return isNull ? Decimal.init : decimalValue(type, bytes);
+        return isNull ? Decimal.init : decimalValue(base.type, base.bytes);
     }
 
     /++
@@ -95,7 +96,7 @@ struct Value
     +/
     string getString() const @safe
     {
-        return isNull ? null : textValue(type, bytes);
+        return isNull ? null : textValue(base.type, base.bytes);
     }
 
     /// The raw bytes, as the server sent them (a copy).
@@ -180,7 +181,7 @@ struct Value
     +/
     UUID getUUID() const @safe
     {
-        return isNull ? UUID.init : uuidValue(type, bytes);
+        return isNull ? UUID.init : uuidValue(base.type, base.bytes);
     }
 
     /++
@@ -191,14 +192,30 @@ struct Value
     +/
     Variant getVariant() const @safe
     {
-        return isNull ? Variant.init : variantValue(type, bytes);
+        return isNull ? Variant.init : variantValue(base.type, base.bytes);
+    }
+
+    /++
+    The value with its base type for a `sql_variant` (e.g. an `int` and its
+    four bytes); any other value as it is. The getters convert this one.
+
+    Throws: `ClientException` if a `sql_variant` value is malformed.
+    +/
+    @property Value base() const @safe
+    {
+        if (isNull || type.type != TdsType.variant)
+            return Value(type, bytes, isNull);
+        TypeInfo inner;
+        const(ubyte)[] data;
+        unwrapVariant(bytes, inner, data);
+        return Value(inner, data, false);
     }
 
     private bool temporal(out Temporal t) const @safe
     {
         if (isNull)
             return false;
-        t = decodeTemporal(type, bytes);
+        t = decodeTemporal(base.type, base.bytes);
         return true;
     }
 }
@@ -206,10 +223,33 @@ struct Value
 ///
 @safe unittest
 {
-    import mssql.types.typeinfo : TdsType, ValueFormat;
+    import mssql.types.typeinfo : ValueFormat;
 
     auto v = Value(TypeInfo(TdsType.intN, ValueFormat.byteLength, 4), [0x2A, 0, 0, 0], false);
     assert(v.getInt() == 42 && v.getString() == "42" && v.getDecimal() == Decimal.fromLong(42));
     v = Value(v.type);
     assert(v.isNull && v.getLong() == 0 && v.getString() is null);
+
+    // sql_variant values carry their base type (golden bytes from SQL Server 2022)
+    const variant = TypeInfo(TdsType.variant, ValueFormat.longLength, 8016);
+    assert(Value(variant, [0x38, 0x00, 0x2A, 0x00, 0x00, 0x00], false).getInt() == 42);
+    const ubyte[] dec = [
+        0x6A, 0x02, 0x05, 0x02, 0x00, 0x96, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    ]; // decimal(5,2) -1.50
+    assert(Value(variant, dec, false).getString() == "-1.50" && Value(variant, dec, false).base.type.name == "decimal");
+    const ubyte[] text = [
+        0xE7, 0x07, 0x09, 0x04, 0xD0, 0x00, 0x34, 0x04, 0x00, 0x78, 0x00, 0x39, 0x04
+    ];
+    assert(Value(variant, text, false).getString() == "xй"); // nvarchar: collation, max length, UTF-16
+    const ubyte[] dt2 = [0x2A, 0x01, 0x07, 0x87, 0xEE, 0x97, 0x76, 0x69, 0x63, 0x46, 0x0B];
+    assert(Value(variant, dt2, false).getString() == "2024-01-31 12:34:56.1234567");
+    const ubyte[] money = [0x3C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4E, 0x61, 0xBC, 0x00];
+    assert(Value(variant, money, false).getDecimal().toFixedString() == "1234.5678");
+
+    // rowversion: binary(8) with user type 80, a big-endian counter
+    auto rv = TypeInfo(TdsType.bigBinary, ValueFormat.ushortLength, 8);
+    rv.userType = 80;
+    const ubyte[] counter = [0, 0, 0, 0, 0, 0, 0x07, 0xD1];
+    assert(rv.name == "timestamp" && Value(rv, counter, false).getLong() == 2001);
+    assert(Value(rv, counter, false).getString() == "0x00000000000007D1");
 }

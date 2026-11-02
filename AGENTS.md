@@ -116,6 +116,10 @@ Run the integration tests with `MSSQL_HOST=localhost:11433 MSSQL_USER=sa MSSQL_P
 
 ## Types learned from the real server
 
+- `sql_variant` (type 0x62, 4-byte length): base type byte, property byte count, properties (decimal: precision, scale; time types: scale; strings: collation and max length; binary: max length), then the value. `CONVERT(nvarchar, sql_variant)` writes dates in style 0 (`Jan 31 2024`); `getString` uses the base type's text. A multi-row `VALUES` into a `sql_variant` column first converts all values to one type: insert them one statement each.
+- `rowversion` is `binary(8)` with user type 80 (big-endian counter); `CONVERT(..., rv, 1)` is not allowed, cast to `varbinary(8)` first.
+- Double-byte code pages: a lead byte plus a trail byte is one character, an invalid pair the default character (U+30FB for 932, `?` otherwise), a lead byte before 0x00 the default character and the 0x00, a lead byte at the end nothing (checked on every pair; tables in dbwire `charset/tables`).
+
 - `getString` gives the text SQL Server writes, checked by `integrationtests.types` against `CONVERT(nvarchar(max), x[, style])`. Where the default `CONVERT` loses information, the lossless style is used: `money` style 2 (4 fraction digits; style 0 has 2), `datetime` style 121 (style 0 is `Jan 31 2024 12:34PM`), `smalldatetime` style 120, binary style 1 (`0x01AB`). `real`/`float` give the shortest text that reads back exactly (`CONVERT` style 0 keeps 6 digits; style 3 always 17).
 - `datetime` holds 1/300 s; SQL Server shows milliseconds as `(ticks * 10 + 1) / 3` (.000, .003, .007); the getters use the same milliseconds.
 - `datetimeoffset` is sent as UTC time and date, then the offset in minutes (signed 16-bit); text and `getDate`/`getTime`/`getDateTime` use the local time at that offset.

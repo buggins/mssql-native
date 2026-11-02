@@ -66,11 +66,13 @@ Features:
   stored procedures with output parameters and return status, multiple result
   sets and row counts, cancellation (also from another thread or task),
   transactions with isolation levels and savepoints;
-- the common types, read and sent exactly: integers, `bit`, `real`/`float`,
+- the types, read and sent exactly: integers, `bit`, `real`/`float`,
   `decimal`/`numeric`/`money` (as dbwire `Decimal`), `char`/`varchar` (in the
-  collation's code page) and `nchar`/`nvarchar`, `binary`/`varbinary`,
+  collation's code page, Japanese, Chinese and Korean included) and
+  `nchar`/`nvarchar`, `binary`/`varbinary`, the `(max)` types, `xml`,
   `date`/`time`/`datetime2`/`datetimeoffset`/`datetime`/`smalldatetime`,
-  `uniqueidentifier`;
+  `uniqueidentifier`, `sql_variant`, `rowversion`, legacy `text`/`ntext`/`image`;
+  CLR types (`hierarchyid`, `geometry`, `geography`) as bytes;
 - thread mode (blocking sockets) and fiber mode (vibe-core 1.22 to 2.x), chosen
   automatically;
 - a connection pool (sessions reset on reuse), struct mapping (`query!T`,
@@ -80,8 +82,8 @@ Examples: [`examples/basic`](examples/basic/source/app.d) (`dub run
 :example-basic`) and [`examples/vibe`](examples/vibe/source/app.d) (`dub run
 :example-vibe`); both read the connection string from `MSSQL_CONNECTION`.
 
-Later: `sql_variant`, CLR types (`hierarchyid`, `geometry`), `varchar` in the
-double-byte code pages (Japanese, Chinese, Korean collations), bulk insert, a
+Later: bulk insert, the text of CLR types (`hierarchyid`, `geometry`; read as
+bytes now), streaming `(max)` values, a
 [ddbc](https://github.com/buggins/ddbc) driver and a
 [hibernated](https://github.com/buggins/hibernated) dialect, integrated
 authentication.
