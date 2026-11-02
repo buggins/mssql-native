@@ -7,8 +7,8 @@ No ODBC, no FreeTDS, no C libraries at build time.
 > **Status: under development.** Nothing is released yet; the plan is tracked
 > in the [roadmap issue](https://github.com/buggins/mssql-native/issues/11).
 > Connecting (TLS, SQL logins), queries with parameters, stored procedures,
-> prepared statements and all the common types work; multiple result sets and
-> cancellation come next.
+> prepared statements, multiple result sets, cancellation, transactions and all
+> the common types work; the connection pool comes next.
 
 ```d
 import mssql;

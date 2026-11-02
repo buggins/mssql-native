@@ -2,8 +2,9 @@
 module app;
 
 import integrationtests.harness;
+import threadtests : threadTests;
 
 int main()
 {
-    return runAllTests(RunnerContext("phobos")) == 0 ? 0 : 1;
+    return runAllTests(RunnerContext("phobos"), threadTests) == 0 ? 0 : 1;
 }
