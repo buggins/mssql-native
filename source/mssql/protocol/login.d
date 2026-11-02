@@ -8,7 +8,7 @@ License:   $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0).
 module mssql.protocol.login;
 
 import mssql.protocol.packet : defaultPacketSize;
-import mssql.protocol.text : toUtf16le;
+import dbwire.charset.utf16 : encodeUtf16le;
 
 /// TDS 7.4 (SQL Server 2012 and newer), the version this client speaks.
 enum uint tds74 = 0x74000004;
@@ -65,15 +65,15 @@ ubyte[] buildLogin7(const ref Login7 login) @safe pure
         data ~= utf16;
     }
 
-    field(toUtf16le(login.hostName));
-    field(toUtf16le(login.userName));
-    field(obfuscate(toUtf16le(login.password)));
-    field(toUtf16le(login.appName));
-    field(toUtf16le(login.serverName));
+    field(encodeUtf16le(login.hostName));
+    field(encodeUtf16le(login.userName));
+    field(obfuscate(encodeUtf16le(login.password)));
+    field(encodeUtf16le(login.appName));
+    field(encodeUtf16le(login.serverName));
     field(null); // ibUnused/cbUnused: no extension block (fExtension is 0)
-    field(toUtf16le(login.libraryName));
-    field(toUtf16le(login.language));
-    field(toUtf16le(login.database));
+    field(encodeUtf16le(login.libraryName));
+    field(encodeUtf16le(login.language));
+    field(encodeUtf16le(login.database));
     table ~= [0, 0, 0, 0, 0, 0]; // ClientID (MAC address): informational
     field(null); // SSPI: none
     field(null); // AtchDBFile: none

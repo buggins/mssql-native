@@ -254,21 +254,6 @@ void testReceiveTimeout()
     enforce(e !is null && !conn.isOpen, "no timeout, or the connection stayed open");
 }
 
-/// Types of later milestones are read (the stream stays in sync) and refused clearly on access.
-void testUnsupportedTypes()
-{
-    auto conn = connectToServer();
-    scope (exit)
-        conn.close();
-    auto r = conn.query("SELECT CAST(1.5 AS decimal(5,2)) AS d, SYSDATETIME() AS t, NEWID() AS g, 7 AS after");
-    scope (exit)
-        r.close();
-    enforce(!r.empty && r.getLong(3) == 7, "the value after them");
-    auto e = collectException!ClientException(r.getString(0));
-    enforce(e !is null && e.msg == "Cannot read a decimal value as text (this type is not supported yet)", e.msg);
-    enforce(r.getBytes(2).length == 16, "raw bytes of a uniqueidentifier");
-}
-
 private string splitFirst(string version_)
 {
     import std.string : indexOf;

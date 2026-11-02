@@ -6,8 +6,8 @@ No ODBC, no FreeTDS, no C libraries at build time.
 
 > **Status: under development.** Nothing is released yet; the plan is tracked
 > in the [roadmap issue](https://github.com/buggins/mssql-native/issues/11).
-> Connecting (TLS, SQL logins), batches and results with integers, `bit`,
-> floats and Unicode strings work; the other types come next.
+> Connecting (TLS, SQL logins), batches and reading results of all the common
+> types work; parameters come next.
 
 ```d
 import mssql;
@@ -34,7 +34,8 @@ Planned for the first release (0.1.0):
   `date`/`time`/`datetime2`/`datetimeoffset`/`datetime`, `uniqueidentifier`;
 - a connection pool and struct mapping.
 
-Later: `(max)` types, `xml`, `sql_variant`, bulk insert, a
+Later: `sql_variant`, CLR types (`hierarchyid`, `geometry`), `varchar` in the
+double-byte code pages (Japanese, Chinese, Korean collations), bulk insert, a
 [ddbc](https://github.com/buggins/ddbc) driver and a
 [hibernated](https://github.com/buggins/hibernated) dialect, integrated
 authentication.

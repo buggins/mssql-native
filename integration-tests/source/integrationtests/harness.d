@@ -9,6 +9,7 @@ import core.exception : AssertError;
 import std.stdio : stderr, writefln;
 
 import integrationtests.basic;
+import integrationtests.types;
 import integrationtests.server : serverConfigured;
 
 /// Integration test entry point. Throws on failure.
@@ -40,6 +41,13 @@ immutable TestCase[] allTests = [
     TestCase("USE changes the database", &testUseDatabase, true),
     TestCase("busy connection and closed results", &testBusy, true),
     TestCase("receive timeout", &testReceiveTimeout, true),
+    TestCase("text of every type matches the server", &testTextMatchesServer, true),
+    TestCase("datetime and smalldatetime rounding", &testDatetimeRounding, true),
+    TestCase("time, datetime2, datetimeoffset scales", &testTimeScales, true),
+    TestCase("char and varchar in every code page", &testCodePages, true),
+    TestCase("typed getters and Variants", &testTypedGetters, true),
+    TestCase("float and real values", &testFloats, true),
+    TestCase("table with every type and NULL rows", &testTableRoundTrip, true),
     TestCase("types not supported yet", &testUnsupportedTypes, true),
 ];
 

@@ -68,10 +68,13 @@ source/mssql/
   settings.d           ConnectionOptions (+ fromDsn sqlserver://, fromParams), HostPort, HostSelection
   exception.d          ServerException (ServerMessage), dbwire's ClientException/ConnectionException/ProtocolException
   protocol/            packet.d (PacketWriter, PacketReader), prelogin.d (options, encryption agreement,
-                       PreloginTlsFraming), login.d (LOGIN7), tokens.d (DONE, ERROR/INFO, LOGINACK, ENVCHANGE),
-                       text.d (UTF-16LE)
-  types/               typeinfo.d (TYPE_INFO, COLMETADATA, value framing for every type), values.d (conversions)
-integration-tests/     shared harness (dub subpackage `:integration-tests`): tests in `allTests` (harness.d);
+                       PreloginTlsFraming), login.d (LOGIN7), tokens.d (DONE, ERROR/INFO, LOGINACK, ENVCHANGE);
+                       UTF-16LE comes from dbwire:charset (encodeUtf16le/decodeUtf16le)
+  types/               typeinfo.d (TYPE_INFO, COLMETADATA, value framing for every type), values.d (conversions,
+                       text, Variant), temporal.d (date/time types), collations.d (collation -> code page,
+                       generated from the server's catalog)
+integration-tests/     shared harness (dub subpackage `:integration-tests`): tests in `allTests` (harness.d),
+                       basic.d (connections, batches), types.d (every type against the server's own text);
                        server from MSSQL_HOST, MSSQL_USER, MSSQL_PASSWORD (MSSQL_VERIFY=1: verify certificates)
 integration-tests-phobos/, integration-tests-vibe/   runners (threads; vibe.d tasks, plus vibetests.d)
 ```
@@ -88,6 +91,16 @@ Run the integration tests with `MSSQL_HOST=localhost:11433 MSSQL_USER=sa MSSQL_P
 - A response may end with DONEPROC (e.g. a batch read as a procedure call: `SELEC 1` gives error 2812); DONEINPROC never ends it.
 - Nullable columns come as INTN/BITN/FLTN with their size; non-null literals as fixed types (INT4, ...).
 - `SET NOCOUNT ON` lasts for the session: DONE tokens then carry no row counts.
+
+## Types learned from the real server
+
+- `getString` gives the text SQL Server writes, checked by `integrationtests.types` against `CONVERT(nvarchar(max), x[, style])`. Where the default `CONVERT` loses information, the lossless style is used: `money` style 2 (4 fraction digits; style 0 has 2), `datetime` style 121 (style 0 is `Jan 31 2024 12:34PM`), `smalldatetime` style 120, binary style 1 (`0x01AB`). `real`/`float` give the shortest text that reads back exactly (`CONVERT` style 0 keeps 6 digits; style 3 always 17).
+- `datetime` holds 1/300 s; SQL Server shows milliseconds as `(ticks * 10 + 1) / 3` (.000, .003, .007); the getters use the same milliseconds.
+- `datetimeoffset` is sent as UTC time and date, then the offset in minutes (signed 16-bit); text and `getDate`/`getTime`/`getDateTime` use the local time at that offset.
+- Dates and times with fewer fraction digits are rounded by the server, not truncated (`time(0)` of `...58.9` is `...59`).
+- `money`: the high 32 bits come first, then the low 32 bits. `decimal`: a sign byte (1 = positive), then a little-endian magnitude of 4, 8, 12 or 16 bytes. GUID: the first three groups little-endian.
+- `char`/`varchar` text is in the collation's code page: SQL collations are identified by the sort id, Windows collations by the LCID (`types/collations.d`, generated with a query of `sys.fn_helpcollations()` and the collation bytes of a column in each). Unicode-only collations (code page 0) can't be used for `varchar`. Double-byte code pages (932, 936, 949, 950) aren't supported yet: such text throws, ASCII text still reads.
+- In T-SQL, `CAST(N'...' AS varchar) COLLATE X` converts through the database's code page first (unmappable characters become `?`); to get text in X's code page write `CAST(N'...' COLLATE X AS varchar)`, or insert `varbinary` into a `varchar` column of collation X (raw bytes, no conversion).
 - Errors are collected until the final DONE, then thrown as one `ServerException`, so the stream stays in sync; severity 20+ closes the connection.
 
 ## Conventions

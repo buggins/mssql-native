@@ -9,7 +9,7 @@ module mssql.protocol.tokens;
 
 import dbwire.io.buffer : BufferedReader;
 import mssql.exception : ProtocolException, ServerMessage;
-import mssql.protocol.text : fromUtf16le;
+import dbwire.charset.utf16 : decodeUtf16le;
 
 /// Token types ([MS-TDS] 2.2.7).
 enum TokenType : ubyte
@@ -191,13 +191,13 @@ struct ByteParser
     /// B_VARCHAR: a byte count of UTF-16 characters, then the characters.
     string bVarchar() @safe pure
     {
-        return fromUtf16le(bytes(2 * u8()));
+        return decodeUtf16le(bytes(2 * u8()));
     }
 
     /// US_VARCHAR: a ushort count of UTF-16 characters, then the characters.
     string usVarchar() @safe pure
     {
-        return fromUtf16le(bytes(2 * u16()));
+        return decodeUtf16le(bytes(2 * u16()));
     }
 
     /// B_VARBYTE: a byte count, then the bytes.
@@ -310,11 +310,11 @@ void skipFeatureExtAck(BufferedReader r) @safe
 @safe unittest
 {
     import dbwire.io.mock : MockTransport;
-    import mssql.protocol.text : toUtf16le;
+    import dbwire.charset.utf16 : encodeUtf16le;
 
     // An ERROR token: Msg 208, Level 16, State 1, Line 1: Invalid object name 'x'.
-    const text = toUtf16le("Invalid object name 'x'.");
-    const server = toUtf16le("db1");
+    const text = encodeUtf16le("Invalid object name 'x'.");
+    const server = encodeUtf16le("db1");
     ubyte[] body;
     body ~= [208, 0, 0, 0, 1, 16];
     body ~= [cast(ubyte)(text.length / 2), 0];
