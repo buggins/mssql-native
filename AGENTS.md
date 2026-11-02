@@ -79,9 +79,10 @@ source/mssql/
                        generated from the server's catalog)
 integration-tests/     shared harness (dub subpackage `:integration-tests`): tests in `allTests` (harness.d),
                        basic.d (connections, batches), types.d (every type against the server's own text),
-                       params.d (parameters, outputs, procedures, prepared statements);
+                       params.d (parameters, outputs, procedures, prepared statements),
+                       statements.d (result sets, counts, cancel, transactions, reset);
                        server from MSSQL_HOST, MSSQL_USER, MSSQL_PASSWORD (MSSQL_VERIFY=1: verify certificates)
-integration-tests-phobos/, integration-tests-vibe/   runners (threads; vibe.d tasks, plus vibetests.d)
+integration-tests-phobos/, integration-tests-vibe/   runners (threads, plus threadtests.d; vibe.d tasks, plus vibetests.d)
 ```
 
 Run the integration tests with `MSSQL_HOST=localhost:11433 MSSQL_USER=sa MSSQL_PASSWORD=MSbbk4k77JKH88g54 dub run :integration-tests-phobos` (and `:integration-tests-vibe`). Other local servers: containers `mssql-2017` (port 14017) and `mssql-2019` (14019), password `Test_password123`.
@@ -100,6 +101,11 @@ Run the integration tests with `MSSQL_HOST=localhost:11433 MSSQL_USER=sa MSSQL_P
 - RPC: system procedures go by id (`0xFFFF`, then sp_executesql 10, sp_prepexec 13, sp_execute 12, sp_unprepare 15). `sp_executesql`/`sp_execute` also send a RETURNSTATUS (0); it is reported only for `callProcedure`. RETURNVALUE tokens (output parameters) come after the rows, before the final DONEPROC; `sp_prepexec` returns the handle as output ordinal 0.
 - A NULL `nvarchar` parameter can't go into a `varbinary` column (no implicit conversion): binary NULLs need `Parameter.nullOf!(ubyte[])`. A `datetimeoffset` parameter stored in a `datetime2` column keeps its local time (the offset is dropped). A `decimal` OUTPUT parameter comes back with the declared scale.
 - Variadic templates taking parameters must not be marked `@safe` (attribute inference): `Variant` copies are `@system`. A lone `null` argument must not match a `Parameter[]` overload, so `parameters(args)` recognises a single `Parameter[]` itself.
+
+- The server holds back output until a packet is full or the batch ends: rows of `SELECT 1; WAITFOR DELAY ...` arrive after the WAITFOR, so `query()` itself waits. Cancel tests start the cancel before the query, or use a large result.
+- Attention (cancel): an 8-byte packet of type 6 written straight to the transport (dbwire's TLS transport allows it from another thread). The server answers with a DONE with status 0x20, at the end of the response; if the batch had already ended, in a message of its own, which the client reads before anything else (`finishIfFinal`, `startRequest`).
+- `RESETCONNECTION` (status 0x08 on the request's first packet) is acknowledged only by ENVCHANGE 18: no database/language changes are sent, so the client restores the login's values itself. The reset rolls back an open transaction; the request then carries transaction descriptor 0.
+- `master` allows snapshot isolation. Command codes in DONE: SELECT 0xC1, INSERT 0xC3, DELETE 0xC4, UPDATE 0xC5.
 
 ## Types learned from the real server
 

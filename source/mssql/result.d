@@ -8,7 +8,7 @@ module mssql.result;
 
 import mssql.connection : Connection;
 import mssql.exception : ClientException;
-import mssql.protocol.tokens : Done;
+import mssql.protocol.tokens : Done, TokenType;
 import mssql.types.typeinfo : ColumnInfo, ValueRef, readColumnMetadata;
 import mssql.protocol.rpc : OutputParameter;
 import core.time : Duration;
@@ -20,9 +20,27 @@ import std.variant : Variant;
 import dbwire.types.decimal : Decimal;
 import mssql.value : Value;
 
+/// The row count of one statement (a DONE or DONEINPROC token with a count).
+struct StatementCount
+{
+    /// The statement's command, e.g. `Command.select`, `Command.insert`.
+    ushort command;
+    /// Rows returned (SELECT) or affected (INSERT, UPDATE, DELETE, ...).
+    ulong rows;
+}
+
+/// Command codes of `StatementCount.command` (the token's CurCmd).
+enum Command : ushort
+{
+    select = 0xC1, /// SELECT
+    insert = 0xC3, /// INSERT
+    delete_ = 0xC4, /// DELETE
+    update = 0xC5, /// UPDATE
+    merge = 0x117, /// MERGE
+}
+
 /++
-The rows of the first result set of a query, read one at a time from the
-server.
+The rows of a query, read one at a time from the server.
 
 Use it as an input range (`foreach (row; conn.query(sql))`: `front` is the
 result itself, positioned on the current row) or with `next()`; don't mix the
@@ -31,38 +49,51 @@ gives the getter's zero value (`0`, `null`, `T.init`): check `isNull` to tell
 NULL apart. A getter that can't convert the column's type throws a
 `ClientException`.
 
-The connection stays busy until all rows are read or `close` is called. When
-the rows end, the rest of the batch (later statements and result sets) is read
-and discarded, which may throw a `ServerException` for a later statement.
+A result from `Connection.query` holds the first result set of the batch:
+when its rows end, the rest of the batch (later statements and result sets) is
+read and discarded, which may throw a `ServerException` for a later statement.
+A result from `Connection.queryMultiple` or `Connection.callProcedure` holds
+all result sets: `nextResult` moves to the next one.
+
+The connection stays busy until the whole response is read: all rows (of all
+result sets for `queryMultiple`), `close` (which reads the rest) or `cancel`
+(which stops the batch).
 +/
 final class QueryResult
 {
     private Connection conn;
-    private ColumnInfo[] columnList; // the first result set's columns
-    private ColumnInfo[] currentColumns; // the columns of the rows being read
-    private bool haveResultSet;
+    private ColumnInfo[] columnList; // the current result set's columns
+    private ColumnInfo[] readingColumns; // the columns of the rows being read
+    private ColumnInfo[] pendingColumns; // the next result set, read ahead (multiple result sets)
+    private bool hasPending;
+    private bool multiple; // all result sets, not only the first
+    private bool haveResultSet; // the current result set exists
     private ubyte[] rowData;
     private ValueRef[] values;
     private ubyte[] skippedData; // rows of later result sets
     private ValueRef[] skippedValues;
     private bool rowReady; // a row is loaded and not consumed
-    private bool rowsEnded; // the first result set is over
+    private bool rowsEnded; // the current result set is over
     private bool finished; // the whole response is read
     private bool positioned; // next() was called
     private ulong rowsRead;
     private OutputParameter[] outputList;
     private int statusValue;
     private bool hasStatus;
+    private StatementCount[] countList;
+    private bool wasCancelled;
     private void delegate(const(OutputParameter)[] outputs) @safe onFinished; // e.g. a prepared statement's handle
 
-    package this(Connection conn, void delegate(const(OutputParameter)[]) @safe onFinished = null) @safe
+    package this(Connection conn, void delegate(const(OutputParameter)[]) @safe onFinished = null,
+            bool multiple = false) @safe
     {
         this.conn = conn;
         this.onFinished = onFinished;
+        this.multiple = multiple;
         conn.guarded({ advance(); });
     }
 
-    /// The columns of the result set (empty if the batch returned no result set).
+    /// The columns of the current result set (empty if the batch returned no result set).
     @property const(ColumnInfo)[] columns() const @safe pure nothrow
     {
         return columnList;
@@ -120,7 +151,7 @@ final class QueryResult
         return !empty;
     }
 
-    /// Number of rows read so far.
+    /// Number of rows of the current result set read so far.
     @property ulong rowCount() const @safe pure nothrow
     {
         return rowsRead;
@@ -253,8 +284,67 @@ final class QueryResult
     }
 
     /++
+    Moves to the next result set of a result from `queryMultiple` or
+    `callProcedure`, discarding the rest of the current one. Statements
+    without a result set (INSERT, SET, ...) are skipped; their row counts are
+    in `counts`.
+
+    Returns: false when there are no more result sets (the response is then
+    read to its end, and the connection released); always false for a result
+    from `query`, whose later result sets are discarded.
+    Throws: `ServerException` if a statement of the batch failed, when the
+    response ends.
+    +/
+    bool nextResult() @safe
+    {
+        rowReady = false;
+        rowsEnded = true;
+        positioned = false;
+        conn.guarded({
+            while (!finished && !hasPending)
+                step();
+        });
+        if (!hasPending)
+            return false;
+        columnList = pendingColumns;
+        pendingColumns = null;
+        hasPending = false;
+        haveResultSet = true;
+        rowsEnded = false;
+        rowsRead = 0;
+        return true;
+    }
+
+    /++
+    The row counts of the statements read so far, in order: rows returned by
+    SELECT, rows affected by INSERT, UPDATE, DELETE, MERGE (none while `SET
+    NOCOUNT ON`).
+    +/
+    @property const(StatementCount)[] counts() const @safe pure nothrow
+    {
+        return countList;
+    }
+
+    /// The number of rows inserted, updated, deleted or merged by the statements read so far.
+    @property ulong recordsAffected() const @safe pure nothrow
+    {
+        ulong n;
+        foreach (c; countList)
+            if (c.command != Command.select)
+                n += c.rows;
+        return n;
+    }
+
+    /// Whether the batch was cancelled (`cancel`, or `Connection.cancel` from another thread or task).
+    @property bool cancelled() const @safe pure nothrow
+    {
+        return wasCancelled;
+    }
+
+    /++
     Reads the rest of the response and releases the connection; remaining rows
-    and later result sets are discarded.
+    and later result sets are discarded. The statements of the batch still run
+    to their end (use `cancel` to stop them).
 
     Throws: `ServerException` if a statement of the batch failed.
     +/
@@ -262,8 +352,28 @@ final class QueryResult
     {
         rowReady = false;
         rowsEnded = true;
+        hasPending = false;
+        multiple = false; // later result sets are discarded
         if (!finished)
             conn.guarded({ advance(); });
+    }
+
+    /++
+    Stops the batch on the server (an attention request) and discards the rest
+    of the response; then the connection is ready. Statements that already ran
+    keep their effects (unless a transaction is rolled back). Errors of the
+    batch are not reported.
+    +/
+    void cancel() @safe
+    {
+        rowReady = false;
+        rowsEnded = true;
+        hasPending = false;
+        multiple = false;
+        if (finished)
+            return;
+        conn.cancel();
+        conn.guarded({ advance(); });
     }
 
     private void checkFinished() const @safe
@@ -289,10 +399,13 @@ final class QueryResult
         return rowData[v.offset .. v.offset + v.length];
     }
 
-    /// Reads up to the next row of the first result set; after its last row, to the end of the response.
+    /++
+    Reads up to the next row of the current result set; after its last row, to
+    the next result set (multiple result sets) or to the end of the response.
+    +/
     private void advance() @safe
     {
-        while (!rowReady && !finished)
+        while (!rowReady && !finished && !hasPending)
             step();
     }
 
@@ -304,11 +417,17 @@ final class QueryResult
         final switch (event)
         {
         case Connection.Event.metadata:
-            currentColumns = readColumnMetadata(conn.reader);
+            readingColumns = readColumnMetadata(conn.reader);
             if (!haveResultSet && !rowsEnded)
             {
-                columnList = currentColumns;
+                columnList = readingColumns; // the first result set
                 haveResultSet = true;
+            }
+            else if (multiple)
+            {
+                pendingColumns = readingColumns; // the next result set: stop here
+                hasPending = true;
+                rowsEnded = true;
             }
             else
                 rowsEnded = true; // a later result set: its rows are discarded
@@ -323,14 +442,17 @@ final class QueryResult
                 rowsRead++;
             }
             else
-                conn.readRow(currentColumns, nullBitmap, skippedData, skippedValues);
+                conn.readRow(readingColumns, nullBitmap, skippedData, skippedValues);
             break;
         case Connection.Event.done:
             if (haveResultSet)
-                rowsEnded = true; // the DONE of the first result set's statement
+                rowsEnded = true; // the DONE of the current result set's statement
+            if (done.hasCount && done.token != TokenType.doneProc)
+                countList ~= StatementCount(done.command, done.rowCount);
             if (conn.finishIfFinal(done))
             {
                 finished = true;
+                wasCancelled = done.attention;
                 outputList = conn.responseOutputs;
                 hasStatus = conn.responseHasStatus;
                 statusValue = conn.responseStatus;

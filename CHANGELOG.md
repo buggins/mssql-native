@@ -8,6 +8,21 @@ All notable changes to mssql-native are documented here. The format follows
 
 ### Added
 
+- Statements in depth (#5):
+  - `queryMultiple` and `QueryResult.nextResult`: all result sets of a batch;
+    `callProcedure` returns all result sets of the procedure;
+    `QueryResult.counts` (rows per statement, with its command) and
+    `recordsAffected`;
+  - cancelling: `Connection.cancel` (from another thread or task) and
+    `QueryResult.cancel` send an attention request and read up to its
+    acknowledgement, also when it comes after the batch has ended; a cancelled
+    `exec` throws `ClientException`, a cancelled result ends (`cancelled`);
+  - transactions: `begin` (with an `IsolationLevel`), `commit`, `rollback`,
+    `savepoint`, `rollback(savepoint)`, `setIsolationLevel`;
+  - `resetSession`: the next request resets the session (for pools), and the
+    client restores the login's database, language and collation;
+  - integration tests for result sets, counts, cancel (same thread, another
+    thread, another task), transactions, reset and fatal errors.
 - Parameters, stored procedures and prepared statements (#4):
   - `exec(sql, args...)` and `query(sql, args...)`: `?` placeholders (not in
     literals, quoted names or comments) become `@p1, @p2, ...`, sent with

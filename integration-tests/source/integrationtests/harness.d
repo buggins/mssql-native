@@ -10,6 +10,7 @@ import std.stdio : stderr, writefln;
 
 import integrationtests.basic;
 import integrationtests.params;
+import integrationtests.statements;
 import integrationtests.types;
 import integrationtests.server : serverConfigured;
 
@@ -59,6 +60,12 @@ immutable TestCase[] allTests = [
     TestCase("prepared statements", &testPreparedStatements, true),
     TestCase("parameters in a transaction", &testParametersInTransaction, true),
     TestCase("Variant and Parameter[] arguments", &testRuntimeParameters, true),
+    TestCase("multiple result sets and row counts", &testMultipleResultSets, true),
+    TestCase("procedures with several result sets", &testProcedureResultSets, true),
+    TestCase("cancelling a result", &testCancelResult, true),
+    TestCase("transaction helpers and isolation levels", &testTransactionHelpers, true),
+    TestCase("session reset", &testResetSession, true),
+    TestCase("fatal errors close the connection", &testFatalError, true),
 ];
 
 /// Runner identity, for reports.

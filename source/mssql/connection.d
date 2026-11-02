@@ -25,7 +25,8 @@ import dbwire.io.transport : Transport;
 import dbwire.tls.transport : TlsContext, TlsOptions, TlsTransport, TlsVersion;
 import mssql.exception;
 import mssql.protocol.login : Login7, buildLogin7;
-import mssql.protocol.packet : PacketReader, PacketType, PacketWriter, defaultPacketSize;
+import mssql.protocol.packet : PacketReader, PacketStatus, PacketType, PacketWriter, defaultPacketSize,
+    packetHeaderSize;
 import mssql.protocol.prelogin;
 import dbwire.charset.utf16 : encodeUtf16le;
 import mssql.params : Parameter, declarations, numbered, parameters, rewritePlaceholders;
@@ -65,11 +66,16 @@ final class Connection
     package bool responseHasStatus; // whether the current response had a RETURNSTATUS
     package int responseStatus; // its value
     private bool statusWanted; // the request calls a user's procedure (not sp_executesql, sp_execute, ...)
+    private shared bool attentionPending; // a cancel was sent and not yet acknowledged
+    private bool resetPending; // the next request resets the session
+    private bool lastCancelled; // the last response ended with an attention acknowledgement
     private HostPort connectedHost;
     private LoginAck ack;
     private string currentDatabase;
     private string currentLanguage;
     private Collation defaultCollation;
+    private string loginDatabase, loginLanguage; // the session state after login, restored by a reset
+    private Collation loginCollation;
     private uint negotiatedPacketSize = defaultPacketSize;
 
     /++
@@ -222,11 +228,16 @@ final class Connection
                     if (done.hasCount && done.command != selectCommand && done.token != TokenType.doneProc)
                         affected += done.rowCount;
                     if (finishIfFinal(done))
+                    {
+                        lastCancelled = done.attention;
                         return;
+                    }
                     break;
                 }
             }
         });
+        if (lastCancelled)
+            throw new ClientException("The batch was cancelled");
         return affected;
     }
 
@@ -256,10 +267,24 @@ final class Connection
         return queryParams(sql, parameters(args));
     }
 
-    private QueryResult queryParams(string sql, const Parameter[] params) @safe
+    private QueryResult queryParams(string sql, const Parameter[] params, bool multiple = false) @safe
     {
         sendExecuteSql(sql, params);
-        return new QueryResult(this);
+        return new QueryResult(this, null, multiple);
+    }
+
+    /++
+    Runs a batch (with parameters as in `exec`, if any) and returns all its
+    result sets: the first one at once, the next ones with
+    `QueryResult.nextResult`; `QueryResult.counts` has the row count of each
+    statement. The connection stays busy until the last result set is read,
+    or the result is closed or cancelled.
+
+    Throws: as `exec`.
+    +/
+    QueryResult queryMultiple(Args...)(string sql, Args args)
+    {
+        return queryParams(sql, parameters(args), true);
     }
 
     /++
@@ -268,8 +293,9 @@ final class Connection
     parameter, `Parameter.output`/`outputOf` for an `OUTPUT` parameter), or
     one `Parameter[]` with all of them.
 
-    Returns: the rows of the procedure's first result set; once they are all
-    read (or the result is closed), its `outputs` and `returnStatus`.
+    Returns: the procedure's result sets (the first one at once, the next ones
+    with `QueryResult.nextResult`); once they are all read (or the result is
+    closed), its `outputs` and `returnStatus`.
     Throws: `ServerException` if the procedure failed.
     +/
     QueryResult callProcedure(Args...)(string name, Args args)
@@ -282,7 +308,7 @@ final class Connection
         if (name.length == 0)
             throw new ClientException("No procedure name");
         sendRpc(name, 0, params);
-        return new QueryResult(this);
+        return new QueryResult(this, null, true);
     }
 
     /++
@@ -294,6 +320,84 @@ final class Connection
     {
         checkOpen();
         return new PreparedStatement(this, sql);
+    }
+
+    /++
+    Cancels the running batch: sends an attention request, after which the
+    server stops the batch and acknowledges. The thread or task reading the
+    result sees its rows end (`QueryResult.cancelled`), and `exec` throws a
+    `ClientException`; the connection then stays usable.
+
+    This is the one method that may be called from another thread or task
+    while the connection is busy. It does nothing if no batch is running.
+    +/
+    void cancel() @safe
+    {
+        import core.atomic : cas;
+
+        if (state != State.busy)
+            return;
+        if (!cas(&attentionPending, false, true))
+            return; // already sent
+        static immutable ubyte[packetHeaderSize] attention = [
+            PacketType.attention, PacketStatus.endOfMessage, 0, packetHeaderSize, 0, 0, 1, 0
+        ];
+        try
+            transport.write(attention[]);
+        catch (Exception e)
+        {
+            close();
+            throw e;
+        }
+    }
+
+    /++
+    Starts a transaction, optionally setting the isolation level first (`SET
+    TRANSACTION ISOLATION LEVEL`, which stays for the session).
+
+    Throws: `ServerException` (e.g. for `snapshot` when the database doesn't allow it).
+    +/
+    void begin(IsolationLevel level = IsolationLevel.unchanged) @safe
+    {
+        exec((level == IsolationLevel.unchanged ? "" : "SET TRANSACTION ISOLATION LEVEL " ~ isolationSql(level) ~ "; ")
+                ~ "BEGIN TRANSACTION");
+    }
+
+    /// Commits the current transaction.
+    void commit() @safe
+    {
+        exec("COMMIT TRANSACTION");
+    }
+
+    /// Rolls back the current transaction, or its part after savepoint `name`.
+    void rollback(string name = null) @safe
+    {
+        exec(name.length ? "ROLLBACK TRANSACTION " ~ quoteName(name) : "ROLLBACK TRANSACTION");
+    }
+
+    /// Sets a savepoint called `name` in the current transaction (`rollback(name)` returns to it).
+    void savepoint(string name) @safe
+    {
+        exec("SAVE TRANSACTION " ~ quoteName(name));
+    }
+
+    /// Sets the isolation level of the session's next transactions (`SET TRANSACTION ISOLATION LEVEL`).
+    void setIsolationLevel(IsolationLevel level) @safe
+    {
+        if (level != IsolationLevel.unchanged)
+            exec("SET TRANSACTION ISOLATION LEVEL " ~ isolationSql(level));
+    }
+
+    /++
+    Resets the session with the next request, as a fresh login would leave it:
+    temporary tables, `SET` options, the isolation level and an open
+    transaction (rolled back) are dropped, and the database and language
+    return to the login's. Used by connection pools; costs no round trip.
+    +/
+    void resetSession() @safe
+    {
+        checkOpen();
+        resetPending = true;
     }
 
     /// Checks that the server answers.
@@ -391,10 +495,28 @@ final class Connection
     +/
     package bool finishIfFinal(const ref Done done) @safe
     {
+        import core.atomic : atomicLoad, atomicStore;
+
+        if (done.attention)
+        {
+            // acknowledges a cancel: the batch is over, its errors no longer matter
+            if (!packets.messageEnded)
+                throw new ProtocolException("The server's response continues after its attention acknowledgement");
+            atomicStore(attentionPending, false);
+            errors = null;
+            state = State.ready;
+            return true;
+        }
         if (done.more || done.token == TokenType.doneInProc)
             return false;
         if (!packets.messageEnded)
             throw new ProtocolException("The server's response continues after its last DONE token");
+        if (atomicLoad(attentionPending))
+        {
+            // the response ended before the server saw the cancel: the acknowledgement follows in a message of its own
+            packets.beginMessage();
+            return false;
+        }
         state = State.ready;
         if (errors.length)
         {
@@ -449,10 +571,9 @@ final class Connection
 
     private void sendBatch(string sql) @safe
     {
-        checkReady();
-        state = State.busy;
+        startRequest();
         guarded({
-            writer.begin(PacketType.sqlBatch);
+            writer.begin(PacketType.sqlBatch, requestStatus());
             putAllHeaders();
             writer.put(encodeUtf16le(sql));
             writer.end();
@@ -481,10 +602,9 @@ final class Connection
     /// Sends an RPC request: procedure `name`, or system procedure `id` when `name` is empty.
     package void sendRpc(string name, ushort id, const Parameter[] params) @safe
     {
-        checkReady();
-        state = State.busy;
+        startRequest();
         guarded({
-            writer.begin(PacketType.rpc);
+            writer.begin(PacketType.rpc, requestStatus());
             putAllHeaders();
             putProcedure(writer, name, id);
             statusWanted = name.length != 0;
@@ -493,6 +613,52 @@ final class Connection
             writer.end();
             beginResponse();
         });
+    }
+
+    /// Checks the connection is ready and marks it busy; reads a late cancel acknowledgement first.
+    private void startRequest() @safe
+    {
+        import core.atomic : atomicLoad;
+
+        checkReady();
+        state = State.busy;
+        if (atomicLoad(attentionPending))
+        {
+            // a cancel crossed the end of the previous response: read its acknowledgement
+            guarded({
+                beginResponse();
+                for (;;)
+                {
+                    Done done;
+                    final switch (nextEvent(done))
+                    {
+                    case Event.metadata:
+                        readColumnMetadata(reader);
+                        break;
+                    case Event.row:
+                    case Event.nbcRow:
+                        throw new ProtocolException("Rows in a cancel acknowledgement");
+                    case Event.done:
+                        if (finishIfFinal(done))
+                        {
+                            state = State.busy;
+                            return;
+                        }
+                        break;
+                    }
+                }
+            });
+        }
+    }
+
+    /// The status of the first packet of a request: with the session reset flag when requested.
+    private ubyte requestStatus() @safe
+    {
+        if (!resetPending)
+            return PacketStatus.normal;
+        resetPending = false;
+        transactionDescriptor = 0; // the reset ends any transaction
+        return PacketStatus.resetConnection;
     }
 
     /// Starts reading a response: per-response state is reset.
@@ -556,6 +722,13 @@ final class Connection
         case EnvChangeType.commitTransaction:
         case EnvChangeType.rollbackTransaction:
         case EnvChangeType.transactionEnded:
+            transactionDescriptor = 0;
+            break;
+        case EnvChangeType.resetAck:
+            // the session is as after login; the server sends no other changes for it
+            currentDatabase = loginDatabase;
+            currentLanguage = loginLanguage;
+            defaultCollation = loginCollation;
             transactionDescriptor = 0;
             break;
         case EnvChangeType.routing:
@@ -690,6 +863,9 @@ final class Connection
             writer.packetSize = negotiatedPacketSize; // from the next message on
         transport.setTimeouts(options.receiveTimeout, options.sendTimeout);
         connectedHost = endpoint;
+        loginDatabase = currentDatabase;
+        loginLanguage = currentLanguage;
+        loginCollation = defaultCollation;
         state = State.ready;
     }
 
@@ -708,6 +884,44 @@ final class Connection
         while (!packets.messageEnded);
         return data;
     }
+}
+
+/// Transaction isolation levels (`SET TRANSACTION ISOLATION LEVEL`).
+enum IsolationLevel
+{
+    unchanged, /// keep the session's level
+    readUncommitted, /// READ UNCOMMITTED
+    readCommitted, /// READ COMMITTED (SQL Server's default)
+    repeatableRead, /// REPEATABLE READ
+    serializable, /// SERIALIZABLE
+    snapshot, /// SNAPSHOT (the database must allow snapshot isolation)
+}
+
+private string isolationSql(IsolationLevel level) @safe pure nothrow
+{
+    final switch (level)
+    {
+    case IsolationLevel.unchanged:
+        return null;
+    case IsolationLevel.readUncommitted:
+        return "READ UNCOMMITTED";
+    case IsolationLevel.readCommitted:
+        return "READ COMMITTED";
+    case IsolationLevel.repeatableRead:
+        return "REPEATABLE READ";
+    case IsolationLevel.serializable:
+        return "SERIALIZABLE";
+    case IsolationLevel.snapshot:
+        return "SNAPSHOT";
+    }
+}
+
+/// `name` as a bracketed T-SQL identifier (`]` doubled).
+private string quoteName(string name) @safe pure
+{
+    import std.array : replace;
+
+    return "[" ~ name.replace("]", "]]") ~ "]";
 }
 
 private uint processId() @trusted nothrow
@@ -897,4 +1111,41 @@ version (unittest)
     auto conn = new Connection(options);
     assertThrown!ProtocolException(conn.query("SELECT 1"));
     assert(!conn.isOpen);
+}
+
+@safe unittest
+{
+    // a cancel that crosses the end of a batch: the acknowledgement comes in a message of its own
+    // (DONE with the attention bit, 0x20), and the next result sets come per statement
+    static ubyte[] done(ushort status, ushort command, ulong rows) @safe pure
+    {
+        ubyte[] b = [
+            0xFD, cast(ubyte) status, cast(ubyte)(status >> 8), cast(ubyte) command,
+            cast(ubyte)(command >> 8)
+        ];
+        foreach (i; 0 .. 8)
+            b ~= cast(ubyte)(rows >> (8 * i));
+        return b;
+    }
+
+    auto server = new MockTransport;
+    server.feed(serverMessage(preloginNoTls));
+    server.feed(serverMessage(capturedLogin));
+    server.feed(serverMessage(done(0x10, 0xC1, 0))); // the batch: no rows, final
+    server.feed(serverMessage(done(0x20, 0, 0))); // the attention acknowledgement
+    ConnectionOptions options;
+    options.user = "sa";
+    options.encrypt = false;
+    Transport factory(string, ushort, Duration)
+    {
+        return server;
+    }
+
+    options.transportFactory = &factory;
+    auto conn = new Connection(options);
+    conn.sendBatch("SELECT 1 WHERE 0 = 1"); // as query() does, before it waits for the first row
+    conn.cancel();
+    assert(server.written[$ - 8 .. $] == [PacketType.attention, 0x01, 0, 8, 0, 0, 1, 0]);
+    auto r = new QueryResult(conn);
+    assert(r.empty && r.cancelled && !conn.isBusy && r.counts.length == 1);
 }
