@@ -4,6 +4,15 @@ All notable changes to mssql-native are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/).
 
+## 0.2.1 — 2026-11-03
+
+### Changed
+
+- Depends on dbwire 0.5 (#22), so that packages can use mssql-native
+  together with oracle-native (ddbc offers both native drivers, and dub
+  resolves the dependencies of all configurations together). No code
+  changes: dbwire 0.5 only adds `dbwire:crypto`.
+
 ## 0.2.0 — 2026-11-02
 
 ### Added
