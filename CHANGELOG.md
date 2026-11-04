@@ -4,6 +4,17 @@ All notable changes to mssql-native are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/).
 
+## 0.2.2 — 2026-11-04
+
+### Changed
+
+- Depends on dbwire 0.6 (#25), the version oracle-native 0.3 uses, so that
+  ddbc can offer both native drivers again. No code changes.
+
+The sources tagged v0.2.2 still report version 0.2.1 (`mssqlVersion`, and the
+client version sent in PRELOGIN and LOGIN7); this was corrected on main
+afterwards (#30).
+
 ## 0.2.1 — 2026-11-03
 
 ### Changed

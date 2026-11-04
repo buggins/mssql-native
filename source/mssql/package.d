@@ -36,7 +36,7 @@ enum uint mssqlVersionMajor = 0;
 /// ditto
 enum uint mssqlVersionMinor = 2;
 /// ditto
-enum uint mssqlVersionPatch = 1;
+enum uint mssqlVersionPatch = 2;
 
 /// Library version as a string, e.g. `"0.1.0"`.
 enum string mssqlVersion = versionString(mssqlVersionMajor, mssqlVersionMinor, mssqlVersionPatch);
