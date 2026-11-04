@@ -4,6 +4,14 @@ All notable changes to mssql-native are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/).
 
+## 0.2.3 — 2026-11-04
+
+### Fixed
+
+- The version constants match the release again (#30): the sources tagged
+  v0.2.2 reported version 0.2.1 (`mssqlVersion`, and the client version sent
+  in PRELOGIN and LOGIN7). No library changes.
+
 ## 0.2.2 — 2026-11-04
 
 ### Changed
@@ -12,8 +20,7 @@ All notable changes to mssql-native are documented here. The format follows
   ddbc can offer both native drivers again. No code changes.
 
 The sources tagged v0.2.2 still report version 0.2.1 (`mssqlVersion`, and the
-client version sent in PRELOGIN and LOGIN7); this was corrected on main
-afterwards (#30).
+client version sent in PRELOGIN and LOGIN7); corrected in 0.2.3 (#30).
 
 ## 0.2.1 — 2026-11-03
 
