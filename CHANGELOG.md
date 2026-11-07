@@ -4,6 +4,15 @@ All notable changes to mssql-native are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- Depends on dbwire 0.8 (`~>0.8.0`, #34), the same as postgresql-native 0.5,
+  clickhoused 0.9 and oracle-native 0.3.1, so they can be used in one build
+  (and in ddbc, which resolves the dependencies of all configurations
+  together). No code changes.
+
 ## 0.2.3 — 2026-11-04
 
 ### Fixed
