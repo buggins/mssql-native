@@ -6,6 +6,8 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+## 0.2.4 — 2026-11-07
+
 ### Changed
 
 - Depends on dbwire 0.8 (`~>0.8.0`, #34), the same as postgresql-native 0.5,
