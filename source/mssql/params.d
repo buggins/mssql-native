@@ -343,7 +343,10 @@ private Parameter ofVariant(Variant value) @trusted // Variant.get is @system
 /// Days since 0001-01-01, in 3 bytes.
 private immutable(ubyte)[] days(const Date date) @safe pure
 {
-    return littleEndian(date.dayOfGregorianCal - 1, 3);
+    const day = date.dayOfGregorianCal - 1;
+    if (day < 0 || day > Date(9999, 12, 31).dayOfGregorianCal - 1) // 3 bytes would wrap around
+        throw new ClientException("Date " ~ date.toISOExtString() ~ " is outside SQL Server's range (0001 to 9999)");
+    return littleEndian(day, 3);
 }
 
 /// `value` as `n` little-endian bytes.

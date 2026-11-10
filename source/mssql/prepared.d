@@ -25,6 +25,7 @@ connection releases it too.
 final class PreparedStatement
 {
     private Connection conn;
+    private ulong lease; // the connection's lease (pooled connections)
     private string text; // with @p1, @p2, ...
     private size_t count; // placeholders
     private int handle; // 0: not prepared
@@ -34,6 +35,7 @@ final class PreparedStatement
     package this(Connection conn, string sql) @safe
     {
         this.conn = conn;
+        lease = conn.lease;
         originalSql = sql;
         text = rewritePlaceholders(sql, count);
     }
@@ -72,10 +74,12 @@ final class PreparedStatement
     private ulong execParams(const Parameter[] params) @safe
     {
         const preparing = send(params);
-        const affected = conn.readExecResponse();
-        if (preparing)
-            takeHandle(conn.responseOutputs);
-        return affected;
+        // also after a ServerException (the handle comes back even when the first execution fails); after
+        // other errors the connection is closed and the handle is gone with it
+        scope (exit)
+            if (preparing && conn.isOpen && !conn.isBusy)
+                takeHandle(conn.responseOutputs);
+        return conn.readExecResponse();
     }
 
     /++
@@ -101,7 +105,7 @@ final class PreparedStatement
     +/
     void close() @safe
     {
-        if (handle == 0 || !conn.isOpen)
+        if (handle == 0 || !conn.isOpen || conn.lease != lease) // a returned pooled session is reset
         {
             handle = 0;
             return;
@@ -118,6 +122,8 @@ final class PreparedStatement
     {
         import std.conv : to;
 
+        if (conn.lease != lease)
+            throw new ClientException("The statement was prepared before the pooled connection was returned");
         if (params.length != count)
             throw new ClientException("The statement has " ~ count.to!string ~ " placeholders but "
                     ~ params.length.to!string ~ " arguments were given");

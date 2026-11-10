@@ -83,6 +83,7 @@ final class QueryResult
     private StatementCount[] countList;
     private bool wasCancelled;
     private void delegate(const(OutputParameter)[] outputs) @safe onFinished; // e.g. a prepared statement's handle
+    private ulong request; // the connection's request this result reads
 
     package this(Connection conn, void delegate(const(OutputParameter)[]) @safe onFinished = null,
             bool multiple = false) @safe
@@ -90,6 +91,7 @@ final class QueryResult
         this.conn = conn;
         this.onFinished = onFinished;
         this.multiple = multiple;
+        request = conn.requestNumber;
         conn.guarded({ advance(); });
     }
 
@@ -117,6 +119,7 @@ final class QueryResult
     /// Whether there are no more rows (reads the next row from the server if needed).
     @property bool empty() @safe
     {
+        checkOwner(true);
         if (!rowReady && !finished)
             conn.guarded({ advance(); });
         return !rowReady;
@@ -300,6 +303,7 @@ final class QueryResult
         rowReady = false;
         rowsEnded = true;
         positioned = false;
+        checkOwner(true);
         conn.guarded({
             while (!finished && !hasPending)
                 step();
@@ -354,6 +358,7 @@ final class QueryResult
         rowsEnded = true;
         hasPending = false;
         multiple = false; // later result sets are discarded
+        checkOwner(false);
         if (!finished)
             conn.guarded({ advance(); });
     }
@@ -370,10 +375,34 @@ final class QueryResult
         rowsEnded = true;
         hasPending = false;
         multiple = false;
+        checkOwner(false);
         if (finished)
             return;
         conn.cancel();
         conn.guarded({ advance(); });
+    }
+
+    /++
+    A result whose response is over (read, failed, or the connection closed or
+    moved on) reads nothing more; `reading`: a connection closed before the
+    response was read is an error (the rows are incomplete), not their end.
+    +/
+    private void checkOwner(bool reading) @safe
+    {
+        if (finished)
+            return;
+        if (!conn.isOpen)
+        {
+            finished = true;
+            rowReady = false;
+            if (reading)
+                throw new ClientException("The connection was closed before the result was read");
+        }
+        else if (conn.requestNumber != request)
+        {
+            finished = true;
+            rowReady = false;
+        }
     }
 
     private void checkFinished() const @safe
@@ -449,7 +478,25 @@ final class QueryResult
                 rowsEnded = true; // the DONE of the current result set's statement
             if (done.hasCount && done.token != TokenType.doneProc)
                 countList ~= StatementCount(done.command, done.rowCount);
-            if (conn.finishIfFinal(done))
+            bool final_;
+            try
+                final_ = conn.finishIfFinal(done);
+            catch (Exception e)
+            {
+                finished = true;
+                // a ServerException (or onMessage's exception) after the response's end: its outputs still count
+                // (a prepared statement's handle comes back even when its first execution fails)
+                if (conn.isOpen && !conn.isBusy)
+                {
+                    outputList = conn.responseOutputs;
+                    hasStatus = conn.responseHasStatus;
+                    statusValue = conn.responseStatus;
+                    if (onFinished !is null)
+                        onFinished(outputList);
+                }
+                throw e;
+            }
+            if (final_)
             {
                 finished = true;
                 wasCancelled = done.attention;

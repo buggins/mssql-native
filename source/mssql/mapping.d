@@ -268,7 +268,18 @@ struct RowRange(T) if (is(T == struct))
     /// The current row.
     @property T front()
     {
-        return readStruct!T(result, positions);
+        try
+            return readStruct!T(result, positions);
+        catch (Exception e)
+        {
+            // foreach gives no handle to close the result: release the connection here
+            try
+                result.close();
+            catch (Exception)
+            {
+            }
+            throw e;
+        }
     }
 
     /// Moves to the next row.

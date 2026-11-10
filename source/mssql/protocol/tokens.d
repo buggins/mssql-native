@@ -302,7 +302,19 @@ void skipFeatureExtAck(BufferedReader r) @safe
         const id = r.readFixed!ubyte();
         if (id == 0xFF)
             return;
-        r.readExactBytes(r.readFixed!uint());
+        skipBytes(r, r.readFixed!uint());
+    }
+}
+
+/// Skips `n` bytes without allocating them (lengths from the server are not trusted).
+void skipBytes(BufferedReader r, ulong n) @safe
+{
+    ubyte[1024] buffer;
+    while (n)
+    {
+        const k = n < buffer.length ? cast(size_t) n : buffer.length;
+        r.readExact(buffer[0 .. k]);
+        n -= k;
     }
 }
 

@@ -16,10 +16,12 @@ thread has its own set, because a vibe.d connection cannot move between event
 loops; the limits apply per thread. Which mode a call uses follows
 `ConnectionOptions.ioMode`, as for single connections.
 
-A connection handed out again has its session reset with its next request (no
-extra round trip): temporary tables, `SET` options, the isolation level and an
-open transaction of the previous user are gone, and the database is the
-login's again (`Connection.resetSession`).
+A returned connection has its open transaction rolled back (its locks are not
+held while it is idle) and its `onMessage` cleared; its session is reset with
+the next request (no extra round trip): temporary tables, `SET` options and
+the isolation level of the previous user are gone, and the database is the
+login's again (`Connection.resetSession`). Prepared statements and bulk
+inserters of the previous user can't be used any more.
 
 Idle connections are checked lazily, when connections are taken or returned,
 so the pool needs no background thread or timer.
@@ -125,6 +127,22 @@ struct PooledConnection
 
     @disable this(this);
 
+    ~this() @safe
+    {
+        import core.memory : GC;
+
+        // what release() does (rollback, reset) happens when it goes out of scope too; not in a GC finalizer
+        // (a PooledConnection inside a collected object), which must neither allocate nor block on the
+        // network: the connection is only handed back, and the next borrower's request resets the session
+        if (GC.inFinalizer)
+        {
+            conn = null;
+            lease.release();
+            return;
+        }
+        release();
+    }
+
     private this(PoolLease lease) @trusted
     {
         import std.algorithm.mutation : move;
@@ -144,9 +162,31 @@ struct PooledConnection
     ///
     alias connection this;
 
-    /// Returns the connection to the pool now. Calling it again does nothing.
+    /++
+    Returns the connection to the pool now: an open transaction is rolled
+    back (its locks are not held while the connection is idle; a connection
+    for which that fails is closed), `onMessage` is cleared, the session is
+    reset with the next request, and statements, results and bulk inserters
+    of this borrower can't be used any more. Calling it again does nothing.
+    +/
     void release() @safe
     {
+        if (conn !is null)
+        {
+            conn.lease++;
+            if (conn.isOpen && !conn.isBusy)
+            {
+                conn.onMessage = null;
+                try
+                {
+                    if (conn.inTransaction)
+                        conn.exec("IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION");
+                    conn.resetSession();
+                }
+                catch (Exception)
+                    conn.close();
+            }
+        }
         conn = null;
         lease.release();
     }

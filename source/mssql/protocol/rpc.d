@@ -9,7 +9,7 @@ module mssql.protocol.rpc;
 
 import dbwire.charset.utf16 : decodeUtf16le, encodeUtf16le;
 import dbwire.io.buffer : BufferedReader;
-import mssql.exception : ProtocolException;
+import mssql.exception : ClientException, ProtocolException;
 import mssql.params : Parameter;
 import mssql.protocol.packet : PacketWriter;
 import mssql.types.typeinfo : Collation, TdsType, TypeInfo, ValueFormat, readTypeInfo, readValue;
@@ -62,6 +62,45 @@ void putProcedure(PacketWriter w, string name, ushort id) @safe
         w.putLE!ushort(id);
     }
     w.putLE!ushort(0); // option flags
+}
+
+/++
+Checks what `putProcedure` and `putParameter` would write before anything
+is sent: the lengths fit their fields (a procedure name 65534 UTF-16 units,
+a parameter name 255, a value its 1- or 2-byte length), and each parameter's
+value format can be sent.
+
+Throws: `ClientException` otherwise.
++/
+void checkRpc(string name, scope const Parameter[] params) @safe
+{
+    import std.utf : codeLength;
+
+    if (codeLength!wchar(name) >= 0xFFFF)
+        throw new ClientException("Procedure name too long");
+    foreach (ref p; params)
+    {
+        if (codeLength!wchar(p.name) > 255)
+            throw new ClientException("Parameter name '" ~ p.name ~ "' longer than 255 UTF-16 code units");
+        final switch (p.type.format)
+        {
+        case ValueFormat.fixed:
+        case ValueFormat.textPointer:
+        case ValueFormat.longLength:
+        case ValueFormat.none:
+            throw new ClientException("A parameter of type " ~ p.type.name ~ " can't be sent");
+        case ValueFormat.byteLength:
+            if (p.data.length > 255) // a 1-byte length
+                throw new ClientException("A " ~ p.type.name ~ " parameter longer than 255 bytes");
+            break;
+        case ValueFormat.ushortLength:
+            if (p.data.length >= 0xFFFF) // a 2-byte length; 0xFFFF is NULL
+                throw new ClientException("A " ~ p.type.name ~ " parameter longer than 65534 bytes");
+            break;
+        case ValueFormat.plp:
+            break;
+        }
+    }
 }
 
 /// Writes one parameter: name, status, TYPE_INFO and value. String types get `collation`.

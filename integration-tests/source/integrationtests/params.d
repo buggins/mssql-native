@@ -239,6 +239,12 @@ void testPreparedStatements()
 
     auto failing = conn.prepare("SELECT 1 / ?");
     enforce(collectException!ServerException(failing.query(0).close()) !is null, "division by zero");
+    enforce(failing.isPrepared, "the handle comes back with the error of the first execution");
+    auto failingExec = conn.prepare("DECLARE @x int = 1 / ?");
+    enforce(collectException!ServerException(failingExec.exec(0)) !is null, "division by zero (exec)");
+    enforce(failingExec.isPrepared, "the handle of a failed first execution (exec)");
+    failingExec.exec(1);
+    failingExec.close();
     auto ok = failing.query(1);
     enforce(!ok.empty && ok.getInt(0) == 1, "the same statement afterwards");
     ok.close();

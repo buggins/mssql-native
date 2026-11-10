@@ -102,6 +102,35 @@ struct ConnectionOptions
     /// Custom transport factory; overrides the backend's connect logic when set.
     TransportFactory transportFactory;
 
+    /// The options as text, with the passwords (`password`, `tls.keyPassword`) hidden.
+    string toString() const @safe
+    {
+        return "ConnectionOptions(" ~ fieldsText(this) ~ ")";
+    }
+
+    // `name: value` of each field of `value`, without the secrets.
+    private static string fieldsText(T)(const ref T value)
+    {
+        import std.conv : to;
+        import std.traits : isDelegate;
+
+        string s;
+        foreach (i, ref field; value.tupleof)
+        {
+            enum name = __traits(identifier, T.tupleof[i]);
+            s ~= (i ? ", " : "") ~ name ~ ": ";
+            static if (name == "password" || name == "keyPassword")
+                s ~= field.length ? "***" : `""`;
+            else static if (is(typeof(field) == const(TlsOptions)))
+                s ~= "TlsOptions(" ~ fieldsText(field) ~ ")";
+            else static if (isDelegate!(typeof(field)))
+                s ~= field is null ? "null" : "set";
+            else
+                s ~= field.to!string;
+        }
+        return s;
+    }
+
     /++
     Parses a connection string:
     `sqlserver://[user[:password]@]host[:port][,host[:port]...][/database][?param=value&...]`.
@@ -371,7 +400,8 @@ AdoConnectionString parseAdoString(string connectionString) @safe
 
     AdoConnectionString result;
     string server, partner;
-    foreach (pair; splitAdo(connectionString))
+    const pairs = splitAdo(connectionString);
+    foreach (index, pair; pairs)
     {
         const key = normalizeKey(pair[0]);
         const value = pair[1];
@@ -512,6 +542,10 @@ AdoConnectionString parseAdoString(string connectionString) @safe
             onlyFalse();
             break;
         default:
+            // after a password, an unknown "key" is likely the rest of it (a ';' in an unquoted value)
+            if (index && isPasswordKey(pairs[index - 1][0]))
+                throw new ClientException("Unknown connection string key after the password (quote a password"
+                        ~ " with ';' in it: Password={...})");
             throw new ClientException("Unknown connection string key '" ~ pair[0] ~ "'");
         }
     }
@@ -563,6 +597,9 @@ private string[2][] splitAdo(string s) @safe
         key = key.strip;
         if (i >= s.length || s[i] == ';')
         {
+            if (key.length && pairs.length && isPasswordKey(pairs[$ - 1][0])) // likely the rest of the password
+                throw new ClientException("Connection string: text without a value after the password (quote a"
+                        ~ " password with ';' in it: Password={...})");
             if (key.length)
                 throw new ClientException("Connection string: no value for '" ~ key ~ "'");
             i++;
@@ -665,4 +702,31 @@ private HostPort parseServer(string server) @safe
     if (host.length == 0)
         throw new ClientException("Server '" ~ server ~ "': no host");
     return HostPort(host, port);
+}
+
+// Whether an ADO.NET connection string key holds a password.
+private bool isPasswordKey(string key) @safe pure
+{
+    const k = normalizeKey(key);
+    return k == "password" || k == "pwd";
+}
+
+// toString hides the passwords; errors about a password with an unquoted ';' don't show its rest
+@safe unittest
+{
+    import std.exception : collectException;
+    import std.string : indexOf;
+
+    auto o = ConnectionOptions.parse("sqlserver://sa:s3cret@db/?encrypt=false");
+    o.tls.keyPassword = "k3y";
+    const text = o.toString();
+    assert(text.indexOf("s3cret") < 0 && text.indexOf("k3y") < 0 && text.indexOf("password: ***") >= 0, text);
+    foreach (s; [
+        "Server=db;User Id=sa;Password=ab;cdsecret;",
+        "Server=db;User Id=sa;Password=ab;cdsecret=x"
+    ])
+    {
+        const e = collectException!ClientException(ConnectionOptions.parse(s));
+        assert(e !is null && e.msg.indexOf("cdsecret") < 0, e is null ? s : e.msg);
+    }
 }
