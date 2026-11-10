@@ -6,6 +6,16 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- dbwire 0.9 (`~>0.9.0`), like clickhoused, postgresql-native and
+  oracle-native: the fixes from its code review (huge TZif counts rejected
+  before allocating, the next address tried when a socket can't be created,
+  faster character set conversions, fewer allocations).
+- `connect_timeout=0` (`Connect Timeout=0`, `ConnectionOptions.connectTimeout
+  = Duration.zero`) means no time limit, as in ADO.NET. With dbwire 0.8
+  connecting failed at once.
+
 ## 0.2.4 — 2026-11-07
 
 ### Changed
