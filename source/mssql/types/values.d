@@ -331,26 +331,93 @@ private string eightBitText(const ref TypeInfo t, scope const(ubyte)[] bytes) @s
     return (() @trusted => cast(string) bytes.idup)(); // ASCII is UTF-8
 }
 
-/// The shortest decimal text that reads back as `value` (as a `float` if `single`).
-private string shortestText(double value, bool single) @safe
+/++
+The shortest decimal text that reads back as `value` (as a `float` if
+`single`) whatever way the reader rounds ties: dbwire's `shortestDigits`
+with `Ties.avoid`, never a text exactly halfway between two values (SQL
+Server reads the tie `-3.668192745606422e+16` as the lower neighbour, a
+correctly rounded `strtod` as the even one), laid out as `%g` with as many
+significant digits (plain when the decimal exponent X of d.ddd × 10^X is at
+least -4 and below the number of digits, else `d.ddde±XX` with at least two
+exponent digits): `0.1`, `-1.5`, `1e+300`, `1e+02`; `nan`, `-nan`, `inf`,
+`-inf` as `%g` writes them.
++/
+private string shortestText(double value, bool single) @safe pure nothrow
 {
-    import std.conv : ConvException, to;
-    import std.format : format;
+    import std.math : isInfinity, isNaN, signbit;
+    import dbwire.types.floattext : Ties, digits, shortestDigits;
 
-    foreach (precision; 1 .. 18)
+    if (single)
+        value = cast(float) value;
+    if (isNaN(value))
+        return signbit(value) ? "-nan" : "nan";
+    if (isInfinity(value))
+        return value < 0 ? "-inf" : "inf";
+    if (value == 0)
+        return signbit(value) ? "-0" : "0";
+    const d = single ? shortestDigits(cast(float) value, Ties.avoid) : shortestDigits(value, Ties.avoid);
+    const significant = d.digits;
+    const exponent = d.pointPos - 1; // value = d.ddd × 10^exponent
+    char[32] text = void; // at most a sign, 17 digits, a point and "e-324", or "-0.000" and 17 digits
+    size_t n;
+    void put(scope const(char)[] part...)
     {
-        auto s = format("%.*g", precision, value);
-        try
+        text[n .. n + part.length] = part[];
+        n += part.length;
+    }
+
+    if (signbit(value))
+        put('-');
+    if (exponent < -4 || exponent >= cast(int) significant.length)
+    {
+        put(significant[0]);
+        if (significant.length > 1)
         {
-            if (single ? s.to!float == cast(float) value : s.to!double == value)
-                return s;
+            put('.');
+            put(significant[1 .. $]);
         }
-        catch (ConvException)
+        const magnitude = exponent < 0 ? -exponent : exponent;
+        put('e', exponent < 0 ? '-' : '+');
+        if (magnitude >= 100)
+            put(cast(char)('0' + magnitude / 100));
+        put(cast(char)('0' + magnitude / 10 % 10), cast(char)('0' + magnitude % 10));
+    }
+    else if (exponent < 0)
+    {
+        put('0', '.');
+        foreach (i; 0 .. -exponent - 1)
+            put('0');
+        put(significant);
+    }
+    else
+    {
+        put(significant[0 .. exponent + 1]);
+        if (exponent + 1 < significant.length)
         {
-            // rounded beyond the largest value (e.g. 2e+308): needs more digits
+            put('.');
+            put(significant[exponent + 1 .. $]);
         }
     }
-    return format("%.17g", value);
+    return text[0 .. n].idup;
+}
+
+@safe unittest
+{
+    import std.math : ldexp;
+
+    assert(shortestText(0.1, false) == "0.1" && shortestText(0.1f, true) == "0.1");
+    double sum = 0.1;
+    sum += 0.2; // at run time: a constant expression is folded at real precision
+    assert(shortestText(sum, false) == "0.30000000000000004");
+    assert(shortestText(-1.5, false) == "-1.5" && shortestText(1e300, false) == "1e+300");
+    assert(shortestText(100, false) == "1e+02" && shortestText(123_456_789.125, false) == "123456789.125");
+    assert(shortestText(0.0001, false) == "0.0001" && shortestText(1.5e-5, false) == "1.5e-05");
+    assert(shortestText(-0.0, false) == "-0" && shortestText(double.nan, false) == "nan");
+    assert(shortestText(-double.infinity, false) == "-inf");
+    assert(shortestText(double.max, false) == "1.7976931348623157e+308");
+    assert(shortestText(ldexp(1.0, -1074), false) == "5e-324" && shortestText(float.max, true) == "3.4028235e+38");
+    assert(shortestText(1e300, true) == "inf"); // a real: what the float becomes
+    assert(shortestText(-36_681_927_456_064_224.0, false) == "-36681927456064224"); // not the tie -3.668192745606422e+16
 }
 
 private string hexText(scope const(ubyte)[] bytes) @safe pure

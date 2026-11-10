@@ -250,6 +250,20 @@ void testTypedGetters()
 /// Float values read back exactly, and their text reads back as the same value.
 void testFloats()
 {
+    import core.stdc.stdlib : strtod, strtof;
+    import std.string : toStringz;
+
+    // read back as C does (correctly rounded; Phobos's parser isn't always)
+    double readDouble(string s)
+    {
+        return strtod(s.toStringz, null);
+    }
+
+    float readFloat(string s)
+    {
+        return strtof(s.toStringz, null);
+    }
+
     auto conn = connectToServer();
     scope (exit)
         conn.close();
@@ -260,10 +274,10 @@ void testFloats()
     size_t rows;
     while (r.next())
     {
-        enforce(r.getDouble(0) == r.getString(1).to!double, r.getString(1));
-        enforce(r.getString(0).to!double == r.getDouble(0), r.getString(0));
-        enforce(r.getDouble(2) == r.getString(3).to!float, r.getString(3));
-        enforce(r.getString(2).to!float == cast(float) r.getDouble(2), r.getString(2));
+        enforce(r.getDouble(0) == readDouble(r.getString(1)), r.getString(1));
+        enforce(readDouble(r.getString(0)) == r.getDouble(0), r.getString(0));
+        enforce(r.getDouble(2) == readFloat(r.getString(3)), r.getString(3));
+        enforce(readFloat(r.getString(2)) == cast(float) r.getDouble(2), r.getString(2));
         rows++;
     }
     enforce(rows == 7, "rows");
@@ -272,11 +286,26 @@ void testFloats()
             ~ "(-2.2250738585072014e-308), (4.9406564584124654e-324), (1.7976931348623157e308)) t(v)");
     while (r.next())
     {
-        enforce(r.getDouble(0) == r.getString(1).to!double, r.getString(1));
-        enforce(r.getString(0).to!double == r.getDouble(0), r.getString(0));
+        enforce(r.getDouble(0) == readDouble(r.getString(1)), r.getString(1));
+        enforce(readDouble(r.getString(0)) == r.getDouble(0), r.getString(0));
         rows++;
     }
     enforce(rows == 11, "rows");
+
+    // the text reads back on the server too, also where the shortest digits would be a tie (SQL Server reads
+    // -3.668192745606422e+16 as the lower neighbour of -36681927456064224); not subnormals: the server's text
+    // parser makes every subnormal 0 (even 4.9406564584124654e-324)
+    foreach (v; [
+        -36_681_927_456_064_224.0, 1e23, 0.1, double.min_normal, 2.0 ^^ -24, 123_456_789.125
+    ])
+    {
+        auto t = conn.query("SELECT CAST(? AS float)", v);
+        enforce(t.next(), "a row");
+        const text = t.getString(0);
+        t.close();
+        enforce(conn.queryValue!double("SELECT CAST(CAST(? AS nvarchar(40)) AS float)", text) == v,
+                "the server reads " ~ text ~ " back");
+    }
 }
 
 /// A table with a column of every type: values and NULL rows (NBCROW) read back.
