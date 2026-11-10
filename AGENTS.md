@@ -47,6 +47,7 @@ dub test                                                   # unit tests
 dub run dscanner@0.15.2 -- --styleCheck .                  # lint (CI fails on any warning)
 dub run dfmt@0.15.2 -- --inplace $(git ls-files '*.d')     # format (CI fails if this changes files)
 dub build -b docs                                          # docs into /docs/ (git-ignored)
+dub run :bench -b release [-- --filter query/]             # benchmarks (doc/benchmarks.md); compare the min column
 ```
 
 Run lint and format before committing D code. dfmt 0.15.2 mangles lambdas with attributes (`() nothrow {` → `() nothrow{`): use named nested functions. It merges `@safe return` into `@safereturn`: avoid the `return` attribute. Run dfmt twice when it changes files. `dub.selections.json` files are git-ignored (a root one listing vibe-core would enable vibe support silently).
@@ -89,6 +90,9 @@ integration-tests/     shared harness (dub subpackage `:integration-tests`): tes
 integration-tests-phobos/, integration-tests-vibe/   runners (threads, plus threadtests.d; vibe.d tasks, plus vibetests.d)
 integration-tests-vibe1/   the vibe.d runner against vibe-core 1.22.6 (sources shared with integration-tests-vibe)
 examples/              basic (`:example-basic`), vibe (`:example-vibe`); read MSSQL_CONNECTION
+bench/                 benchmarks (dub subpackage `:bench`, local runs only): fakeserver.d (an in-memory server:
+                       PRELOGIN without encryption, LOGIN7 answered with LOGINACK, then scripted token streams),
+                       cases.d, runner.d; results in doc/benchmarks.md
 ```
 
 Run the integration tests with `MSSQL_HOST=localhost:11433 MSSQL_USER=sa MSSQL_PASSWORD=MSbbk4k77JKH88g54 dub run :integration-tests-phobos` (and `:integration-tests-vibe`). Other local servers: containers `mssql-2017` (port 14017) and `mssql-2019` (14019), password `Test_password123`.

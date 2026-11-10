@@ -115,6 +115,31 @@ final class PacketWriter
         put(one[]);
     }
 
+    /++
+    Appends `text` as UTF-16LE, exactly as `encodeUtf16le` encodes it
+    (invalid UTF-8 as U+FFFD); ASCII text goes in without allocating (until
+    dbwire has an encoder into a caller's buffer: buggins/dbwire#66).
+    +/
+    void putUtf16(scope const(char)[] text) @safe
+    {
+        import dbwire.charset.utf16 : encodeUtf16le;
+
+        if (!isAscii(text))
+            return put(encodeUtf16le(text));
+        ubyte[512] chunk;
+        while (text.length)
+        {
+            const n = text.length < chunk.length / 2 ? text.length : chunk.length / 2;
+            foreach (i; 0 .. n)
+            {
+                chunk[2 * i] = cast(ubyte) text[i];
+                chunk[2 * i + 1] = 0;
+            }
+            put(chunk[0 .. 2 * n]);
+            text = text[n .. $];
+        }
+    }
+
     /// Appends a little-endian value.
     void putLE(T)(T value) @safe if (isFixedWireType!T)
     {
@@ -162,6 +187,15 @@ final class PacketWriter
         firstStatus = PacketStatus.normal; // status bits such as reset go into the first packet only
         used = packetHeaderSize;
     }
+}
+
+/// Whether `text` is all ASCII (so its UTF-16 form is two bytes per `char`).
+bool isAscii(scope const(char)[] text) @safe pure nothrow @nogc
+{
+    foreach (c; text)
+        if (c >= 0x80)
+            return false;
+    return true;
 }
 
 /++
@@ -327,4 +361,30 @@ final class PacketReader : Transport
     r = new PacketReader(t);
     r.beginMessage();
     assertThrown!ConnectionException(r.read(b[]));
+}
+
+// putUtf16 writes what encodeUtf16le gives, ASCII or not, across packet boundaries
+@safe unittest
+{
+    import std.array : replicate;
+    import dbwire.charset.utf16 : encodeUtf16le;
+    import dbwire.io.mock : MockTransport;
+
+    foreach (text; ["", "SELECT 1", "x".replicate(700), "é😀\xFF ok", "ab".replicate(300) ~ "ж"])
+    {
+        auto t = new MockTransport;
+        auto w = new PacketWriter(t, 512);
+        w.begin(PacketType.sqlBatch);
+        w.putUtf16(text);
+        w.end();
+        ubyte[] payload;
+        for (auto rest = t.written; rest.length;)
+        {
+            const len = (rest[2] << 8) | rest[3];
+            payload ~= rest[packetHeaderSize .. len];
+            rest = rest[len .. $];
+        }
+        assert(payload == encodeUtf16le(text));
+    }
+    assert(isAscii("SELECT ?") && !isAscii("é") && isAscii(""));
 }

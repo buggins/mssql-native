@@ -28,7 +28,8 @@
         "./integration-tests-vibe",
         "./integration-tests-vibe1",
         "./examples/basic",
-        "./examples/vibe"
+        "./examples/vibe",
+        "./bench"
     ],
     "buildTypes": {
         "docs": {

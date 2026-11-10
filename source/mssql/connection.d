@@ -30,13 +30,14 @@ import mssql.protocol.login : Login7, buildLogin7;
 import mssql.protocol.packet : PacketReader, PacketStatus, PacketType, PacketWriter, defaultPacketSize,
     packetHeaderSize;
 import mssql.protocol.prelogin;
-import dbwire.charset.utf16 : encodeUtf16le;
 import mssql.bulk : BulkInserter, BulkOptions;
-import mssql.mapping : RowRange, columnNames, fieldParameters, fieldPositions, quoteIdentifier, readStruct, readValue;
-import mssql.params : Parameter, declarations, numbered, parameters, rewritePlaceholders, withDecimalScale;
-import std.range.primitives : ElementType, isInputRange;
+import mssql.mapping : RowRange, columnNames, fieldParametersInto, fieldPositions, quoteIdentifier, readStruct,
+    readValue;
+import mssql.params : Parameter, numberedDeclarations, parameterName, parameters, rewritePlaceholders, withDecimalScale;
+import std.range.primitives : ElementType, hasLength, isInputRange;
 import mssql.prepared : PreparedStatement;
-import mssql.protocol.rpc : OutputParameter, ProcId, checkRpc, putParameter, putProcedure, readReturnValue;
+import mssql.protocol.rpc : OutputParameter, ProcId, checkRpc, putParameter, putProcedure, putTextParameter,
+    readReturnValue;
 import mssql.protocol.tokens;
 import mssql.result : QueryResult;
 import mssql.settings : ConnectionOptions, HostPort;
@@ -91,6 +92,11 @@ final class Connection : Poolable
     private bool attentionDeferred; // cancel() came while the request was being written (under writeLock)
     package ulong requestNumber; // incremented with each request: results know whether they still own the stream
     package ulong lease; // counts the times a pool took the connection back: older statements and inserters refuse
+    private enum maxCachedSql = 8192; // longer statements aren't cached by sendExecuteSql
+    private string lastSql, lastText; // the last statement with placeholders, and its text with @p1, @p2, ...
+    private size_t lastCount; // its number of placeholders
+    private char[] declarationBuffer; // reused by numberedDeclarations
+    private ubyte[] nullBitmap; // NBCROW: the current row's null bitmap
 
     /++
     Called with each informational message (INFO token: `PRINT` output,
@@ -400,39 +406,47 @@ final class Connection : Poolable
         foreach (c; columns)
             quoted ~= quoteIdentifier(c);
         const head = "INSERT INTO " ~ table ~ " (" ~ quoted.join(", ") ~ ") VALUES ";
-        string placeholders = "(?";
-        foreach (_; 1 .. columns.length)
-            placeholders ~= ", ?";
-        placeholders ~= ")";
+        string fullText; // the statement for perStatement rows, built once
+        const(char)[] textFor(size_t count)
+        {
+            if (count == perStatement && fullText.length)
+                return fullText;
+            const text = insertText(head, columns.length, count);
+            if (count == perStatement)
+                fullText = text;
+            return text;
+        }
 
-        Parameter[] params;
+        static if (hasLength!R)
+            const capacity = rows.length < perStatement ? rows.length : perStatement;
+        else
+            enum capacity = perStatement < 16 ? perStatement : 16; // grows below
+        auto params = new Parameter[capacity * columns.length]; // a statement's parameters, row after row
         size_t pending;
         ulong inserted;
         bool ownTransaction;
         void flush()
         {
+            auto used = params[0 .. pending * columns.length];
             // one decimal scale per column (the column's type is the union of its rows' types)
             foreach (c; 0 .. columns.length)
             {
                 ubyte scale;
                 bool decimal;
-                for (size_t i = c; i < params.length; i += columns.length)
-                    if (params[i].type.type == TdsType.decimalN)
+                for (size_t i = c; i < used.length; i += columns.length)
+                    if (used[i].type.type == TdsType.decimalN)
                     {
                         decimal = true;
-                        if (params[i].type.scale > scale)
-                            scale = params[i].type.scale;
+                        if (used[i].type.scale > scale)
+                            scale = used[i].type.scale;
                     }
                 if (decimal)
-                    for (size_t i = c; i < params.length; i += columns.length)
-                        if (params[i].type.type == TdsType.decimalN)
-                            params[i] = withDecimalScale(params[i], scale);
+                    for (size_t i = c; i < used.length; i += columns.length)
+                        if (used[i].type.type == TdsType.decimalN && used[i].type.scale != scale)
+                            used[i] = withDecimalScale(used[i], scale);
             }
-            string sql = head;
-            foreach (i; 0 .. pending)
-                sql ~= (i ? ", " : "") ~ placeholders;
-            inserted += execParams(sql, params);
-            params.length = 0;
+            sendExecuteSqlText(textFor(pending), used);
+            inserted += readExecResponse();
             pending = 0;
         }
 
@@ -449,7 +463,9 @@ final class Connection : Poolable
                     }
                     flush();
                 }
-                params ~= fieldParameters(row);
+                if (params.length < (pending + 1) * columns.length) // a range without length: double, up to a statement
+                    params.length = (2 * pending < perStatement ? 2 * pending : perStatement) * columns.length;
+                fieldParametersInto(row, params[pending * columns.length .. (pending + 1) * columns.length]);
                 pending++;
             }
             if (pending)
@@ -476,6 +492,33 @@ final class Connection : Poolable
             return insert(table, only(row));
         else
             return insert(table, (&row)[0 .. 1]); // @system: the slice points to the parameter
+    }
+
+    // `head` and `count` rows of `columns` placeholders: (@p1, @p2), (@p3, @p4), ...
+    private static string insertText(string head, size_t columns, size_t count) @safe pure nothrow
+    {
+        static char[] build(string head, size_t columns, size_t count) @safe pure nothrow
+        {
+            char[] sql;
+            sql.reserve(head.length + count * (2 + columns * 9));
+            sql ~= head;
+            size_t number;
+            foreach (r; 0 .. count)
+            {
+                sql ~= r ? ", (" : "(";
+                foreach (c; 0 .. columns)
+                {
+                    char[24] name;
+                    if (c)
+                        sql ~= ", ";
+                    sql ~= name[0 .. parameterName(++number, name)];
+                }
+                sql ~= ')';
+            }
+            return sql;
+        }
+
+        return build(head, columns, count); // a new array from a pure function: unique, so it converts
     }
 
     private QueryResult run(Args...)(string sql, auto ref Args args)
@@ -841,7 +884,7 @@ final class Connection : Poolable
     }
 
     /// Reads a ROW or NBCROW (after its token byte) of `columns` into `data`/`values`.
-    package void readRow(const ColumnInfo[] columns, bool nullBitmap, ref ubyte[] data, ref ValueRef[] values) @safe
+    package void readRow(const ColumnInfo[] columns, bool hasNullBitmap, ref ubyte[] data, ref ValueRef[] values) @safe
     {
         if (values.length != columns.length)
             values = new ValueRef[columns.length];
@@ -849,12 +892,14 @@ final class Connection : Poolable
         // Values of the previous row may still view these bytes, but only as const(ubyte)[] (documented as
         // valid until the next row); nothing makes an immutable slice of them, so overwriting them is safe
         (() @trusted => data.assumeSafeAppend())();
-        ubyte[] bitmap;
-        if (nullBitmap)
-            bitmap = reader.readExactBytes((columns.length + 7) / 8).dup;
+        if (hasNullBitmap)
+        {
+            nullBitmap.length = (columns.length + 7) / 8;
+            reader.readExact(nullBitmap);
+        }
         foreach (i, ref c; columns)
         {
-            if (nullBitmap && (bitmap[i / 8] & (1 << (i % 8))) != 0)
+            if (hasNullBitmap && (nullBitmap[i / 8] & (1 << (i % 8))) != 0)
                 values[i] = ValueRef.init; // NULL: no data in the row
             else
                 values[i] = readValue(reader, c.type, data, options.maxValueLength);
@@ -908,7 +953,7 @@ final class Connection : Poolable
         guarded({
             writer.begin(PacketType.sqlBatch, requestStatus());
             putAllHeaders();
-            writer.put(encodeUtf16le(sql));
+            writer.putUtf16(sql);
             writer.end();
             requestWritten();
             statusWanted = false;
@@ -920,31 +965,89 @@ final class Connection : Poolable
     {
         import std.conv : to;
 
+        checkReady(); // before the cache changes: a busy connection's request may be using it
+        string text;
         size_t count;
-        const text = rewritePlaceholders(sql, count);
+        if (sql is lastSql || sql == lastSql) // the same statement again (a loop) is rewritten once
+        {
+            text = lastText;
+            count = lastCount;
+        }
+        else
+        {
+            text = rewritePlaceholders(sql, count);
+            if (sql.length <= maxCachedSql) // a large generated batch isn't kept alive
+            {
+                lastSql = sql;
+                lastText = text;
+                lastCount = count;
+            }
+        }
         if (count != params.length)
             throw new ClientException("The statement has " ~ count.to!string ~ " placeholders but "
                     ~ params.length.to!string ~ " arguments were given");
         if (params.length == 0)
             return sendBatch(sql);
-        auto values = numbered(params);
-        sendRpc(null, ProcId.executeSql, [
-            Parameter.of(text), Parameter.of(declarations(values))
-        ] ~ values);
+        sendExecuteSqlText(text, params);
+    }
+
+    /// sp_executesql of `text`, whose placeholders are `@p1`, `@p2`, ..., with `params` for them.
+    package void sendExecuteSqlText(scope const(char)[] text, const Parameter[] params) @safe
+    {
+        const decl = declarationsOf(params);
+        void head(PacketWriter w) @safe
+        {
+            putTextParameter(w, text, defaultCollation);
+            putTextParameter(w, decl, defaultCollation);
+        }
+
+        sendSystemRpc(ProcId.executeSql, &head, params);
+    }
+
+    /++
+    Sends an RPC of system procedure `id`: the parameters `head` writes, then
+    `params` named `@p1`, `@p2`, ...
+    +/
+    package void sendSystemRpc(ushort id, scope void delegate(PacketWriter) @safe head, const Parameter[] params) @safe
+    {
+        sendRpcRequest(null, id, head, params, true);
+    }
+
+    /++
+    The `@params` declaration of `params` named `@p1`, `@p2`, ..., in a buffer
+    the next call reuses (a request being written may still read it, so a
+    busy connection refuses first).
+
+    Throws: `ClientException` if the connection is closed or busy.
+    +/
+    package const(char)[] declarationsOf(const Parameter[] params) @safe
+    {
+        checkReady();
+        return numberedDeclarations(params, declarationBuffer);
     }
 
     /// Sends an RPC request: procedure `name`, or system procedure `id` when `name` is empty.
     package void sendRpc(string name, ushort id, const Parameter[] params) @safe
     {
-        checkRpc(name, params); // before anything is sent: a bad request leaves the connection as it is
+        sendRpcRequest(name, id, null, params, false);
+    }
+
+    // An RPC request: the procedure, the parameters `head` writes (if any), then `params`, named `@p1`, `@p2`, ...
+    // with `numberedNames`.
+    private void sendRpcRequest(string name, ushort id, scope void delegate(PacketWriter) @safe head,
+            const Parameter[] params, bool numberedNames) @safe
+    {
+        checkRpc(name, params, numberedNames); // before anything is sent: a bad request leaves the connection as it is
         startRequest();
         guarded({
             writer.begin(PacketType.rpc, requestStatus());
             putAllHeaders();
             putProcedure(writer, name, id);
             statusWanted = name.length != 0;
-            foreach (ref p; params)
-                putParameter(writer, p, defaultCollation);
+            if (head !is null)
+                head(writer);
+            foreach (i, ref p; params)
+                putParameter(writer, p, defaultCollation, numberedNames ? i + 1 : 0);
             writer.end();
             requestWritten();
             beginResponse();
