@@ -32,6 +32,32 @@ From the review of attributes and D idioms (#42):
 
 ### Performance
 
+- From the performance review (#43), measured with the new `bench/`
+  subpackage (`dub run :bench -b release`, an in-memory fake server; see
+  `doc/benchmarks.md`); requests are byte for byte the same as before:
+  - `getDouble`/`getLong` of decimals and money whose unscaled value fits in
+    64 bits without `BigInt` (48 to 86 times faster, no allocation); doubles
+    stay correctly rounded.
+  - Date and time text (`getString`) built in a stack buffer instead of up
+    to four `format` calls: 7 to 18 times faster; `uniqueidentifier` and
+    binary text without `format` (13 and 61 times faster).
+    `datetimeoffset` `getSysTime` shares time zones for offsets in whole
+    quarter hours (no allocation).
+  - Requests with parameters: `@pN` names, the declarations and ASCII text
+    written straight into the packet buffer, a statement run again in a loop
+    rewritten once (`?` → `@pN`), no temporary `Parameter` arrays: `exec`
+    with parameters 2.9 times faster with a fifth of the allocations,
+    prepared statements 2.2 times.
+  - `insert!T`: one parameter array per call, filled in place, and the
+    statement text built once per batch size: 3.9 times faster, 124 bytes
+    per row instead of 4.9 KB.
+  - Bulk loads: no `Parameter[]` per row, the row buffer reused, the struct
+    fields checked once per type: 1.8 to 2.7 times faster, 208 bytes per
+    row instead of 1.2 to 2.6 KB.
+  - NBCROW null bitmaps and legacy text pointers read without allocating;
+    column names decoded in the read buffer; `Parameter.of` of `Decimal`,
+    `DateTime` and `SysTime` without temporary arrays (2.4 to 4.5 times
+    faster).
 - `real`/`float` text (`getString`) from dbwire's `shortestDigits` instead of
   up to 17 `format("%.*g")` and `to!double` attempts (#41): 3.6 to 5.4 times
   faster, one allocation (doubles like prices: 0.89 µs and 277 B before,

@@ -11,6 +11,7 @@ module mssql.types.temporal;
 import core.time : Duration, hnsecs, minutes;
 import std.datetime.date : Date, DateTime, TimeOfDay;
 import std.datetime.systime : SysTime;
+import std.datetime.timezone : SimpleTimeZone;
 import mssql.exception : ClientException;
 import mssql.types.typeinfo : TdsType, TypeInfo;
 
@@ -71,12 +72,12 @@ struct Temporal
     +/
     @property SysTime sysTime() const @safe pure
     {
-        import std.datetime.timezone : SimpleTimeZone, UTC;
+        import std.datetime.timezone : UTC;
 
         const local = days * ticksPerDay + ticks;
         if (kind != TemporalKind.dateTimeOffset)
             return SysTime(local, UTC());
-        return SysTime(local - offset * ticksPerMinute, new immutable SimpleTimeZone(minutes(offset)));
+        return SysTime(local - offset * ticksPerMinute, offsetZone(offset));
     }
 
     /++
@@ -86,28 +87,86 @@ struct Temporal
     +/
     string toString() const @safe pure
     {
-        import std.format : format;
+        char[64] text;
+        size_t n;
+        // `v` in decimal, zero-padded to `width` digits
+        void put(long v, size_t width)
+        {
+            if (v < 0)
+            {
+                text[n++] = '-';
+                v = -v;
+            }
+            size_t k = 1;
+            for (long rest = v / 10; rest; rest /= 10)
+                k++;
+            if (k < width)
+                k = width;
+            foreach_reverse (i; 0 .. k)
+            {
+                text[n + i] = cast(char)('0' + v % 10);
+                v /= 10;
+            }
+            n += k;
+        }
 
-        string s;
+        void sep(char c)
+        {
+            text[n++] = c;
+        }
+
         if (kind != TemporalKind.time)
         {
             const d = date;
-            s = format("%04d-%02d-%02d", d.year, d.month, d.day);
+            put(d.year, 4);
+            sep('-');
+            put(d.month, 2);
+            sep('-');
+            put(d.day, 2);
             if (kind == TemporalKind.date)
-                return s;
-            s ~= ' ';
+                return text[0 .. n].idup;
+            sep(' ');
         }
         const seconds = ticks / ticksPerSecond;
-        s ~= format("%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60);
+        put(seconds / 3600, 2);
+        sep(':');
+        put(seconds / 60 % 60, 2);
+        sep(':');
+        put(seconds % 60, 2);
         if (digits > 0)
-            s ~= format(".%07d", ticks % ticksPerSecond)[0 .. 1 + digits];
+        {
+            sep('.');
+            const start = n;
+            put(ticks % ticksPerSecond, 7);
+            n = start + (digits < 7 ? digits : 7);
+        }
         if (kind == TemporalKind.dateTimeOffset)
         {
             const int a = offset < 0 ? -cast(int) offset : offset;
-            s ~= format(" %s%02d:%02d", offset < 0 ? '-' : '+', a / 60, a % 60);
+            sep(' ');
+            sep(offset < 0 ? '-' : '+');
+            put(a / 60, 2);
+            sep(':');
+            put(a % 60, 2);
         }
-        return s;
+        return text[0 .. n].idup;
     }
+}
+
+// The offsets SQL Server allows in steps of 15 minutes (-14:00 to +14:00), made at compile time
+private static immutable SimpleTimeZone[] quarterHourZones = () {
+    immutable(SimpleTimeZone)[] zones;
+    foreach (i; -56 .. 57)
+        zones ~= new immutable SimpleTimeZone(minutes(15 * i));
+    return zones;
+}();
+
+// A time zone `offset` minutes from UTC (shared for the usual offsets)
+private immutable(SimpleTimeZone) offsetZone(short offset) @safe pure
+{
+    if (offset % 15 == 0 && offset >= -840 && offset <= 840)
+        return quarterHourZones[offset / 15 + 56];
+    return new immutable SimpleTimeZone(minutes(offset));
 }
 
 private enum long ticksPerSecond = 10_000_000;
@@ -309,4 +368,48 @@ private ClientException invalid(const ref TypeInfo t) @safe pure nothrow
     assert(decodeTemporal(date, [0, 0, 0]).toString() == "0001-01-01");
     const int4 = TypeInfo(TdsType.int4, ValueFormat.fixed, 4);
     assertThrown!ClientException(decodeTemporal(int4, [0, 0, 0, 0]));
+}
+
+// The text matches the format-based layout it replaced; offsets share zones where they can
+@safe unittest
+{
+    import std.format : format;
+    import std.random : Mt19937, uniform;
+
+    static string reference(const Temporal v)
+    {
+        string s;
+        if (v.kind != TemporalKind.time)
+        {
+            const d = v.date;
+            s = format("%04d-%02d-%02d", d.year, d.month, d.day);
+            if (v.kind == TemporalKind.date)
+                return s;
+            s ~= ' ';
+        }
+        const seconds = v.ticks / ticksPerSecond;
+        s ~= format("%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60);
+        if (v.digits > 0)
+            s ~= format(".%07d", v.ticks % ticksPerSecond)[0 .. 1 + v.digits];
+        if (v.kind == TemporalKind.dateTimeOffset)
+        {
+            const int a = v.offset < 0 ? -cast(int) v.offset : v.offset;
+            s ~= format(" %s%02d:%02d", v.offset < 0 ? '-' : '+', a / 60, a % 60);
+        }
+        return s;
+    }
+
+    auto rng = Mt19937(7);
+    foreach (i; 0 .. 20_000)
+    {
+        Temporal v;
+        v.kind = cast(TemporalKind) uniform(0, 4, rng);
+        v.days = v.kind == TemporalKind.time ? 0 : uniform(0, 3_652_059, rng);
+        v.ticks = v.kind == TemporalKind.date ? 0 : uniform(0L, ticksPerDay, rng);
+        v.offset = cast(short) uniform(-840, 841, rng);
+        v.digits = cast(ubyte) uniform(0, 8, rng);
+        assert(v.toString() == reference(v), reference(v));
+    }
+    assert(offsetZone(60) is offsetZone(60) && offsetZone(-840).utcOffset == minutes(-840));
+    assert(offsetZone(7).utcOffset == minutes(7) && offsetZone(845).utcOffset == minutes(845));
 }

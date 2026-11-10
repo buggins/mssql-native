@@ -455,8 +455,9 @@ ValueRef readValue(BufferedReader r, const ref TypeInfo t, ref ubyte[] data, siz
         const pointerLength = r.readFixed!ubyte();
         if (pointerLength == 0)
             return v;
-        r.readExactBytes(pointerLength); // text pointer
-        r.readExactBytes(8); // timestamp
+        ubyte[255] skipped; // the text pointer, then the timestamp: not needed
+        r.readExact(skipped[0 .. pointerLength]);
+        r.readExact(skipped[0 .. 8]);
         length = r.readFixed!uint();
         break;
     case ValueFormat.plp:
@@ -515,7 +516,12 @@ private Collation readCollation(BufferedReader r) @safe
 
 private string readBVarchar(BufferedReader r) @safe
 {
-    return decodeUtf16le(r.readExactBytes(2 * r.readFixed!ubyte()));
+    const n = 2 * r.readFixed!ubyte();
+    if (n > r.capacity) // a very small buffer
+        return decodeUtf16le(r.readExactBytes(n));
+    const text = decodeUtf16le(r.ensure(n)[0 .. n]); // decoded in the buffer: no copy of the bytes
+    r.consume(n);
+    return text;
 }
 
 private string readUsVarchar(BufferedReader r) @safe
@@ -526,9 +532,11 @@ private string readUsVarchar(BufferedReader r) @safe
 /// `b` as two upper-case hex digits.
 package(mssql) string hexByte(ubyte b) @safe pure nothrow
 {
-    static immutable digits = "0123456789ABCDEF";
-    return [digits[b >> 4], digits[b & 15]];
+    return [hexDigits[b >> 4], hexDigits[b & 15]];
 }
+
+/// Upper-case hex digits.
+package(mssql) immutable hexDigits = "0123456789ABCDEF";
 
 version (unittest)
 {

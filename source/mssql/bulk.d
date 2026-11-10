@@ -23,8 +23,8 @@ module mssql.bulk;
 
 import mssql.connection : Connection;
 import mssql.exception : ClientException;
-import mssql.mapping : columnNames, fieldParameters;
-import mssql.params : Parameter, parameters;
+import mssql.mapping : columnNames, fieldParametersInto;
+import mssql.params : Parameter, isParameterArray;
 import mssql.types.encode : appendTypeInfo, appendValue, bulkType, declaration;
 import mssql.types.typeinfo : TdsType, TypeInfo;
 import std.uni : toLower;
@@ -62,6 +62,7 @@ final class BulkInserter
     private string insertSql;
     private BulkOptions options;
     private ubyte[] row;
+    private immutable(string)[] checkedFields; // the fields of the struct type `add` checked last
     private ulong inserted; // rows of finished batches
     private size_t inBatch; // rows sent in the current batch
     private bool sending; // a bulk load message is open
@@ -148,7 +149,15 @@ final class BulkInserter
     +/
     void addRow(Args...)(auto ref Args args)
     {
-        addParameters(parameters(args));
+        static if (isParameterArray!Args)
+            addParameters(args[0]);
+        else
+        {
+            Parameter[Args.length] values; // addParameters doesn't keep them
+            foreach (i, ref arg; args)
+                values[i] = Parameter.of(arg);
+            addParameters(values[]);
+        }
     }
 
     /++
@@ -160,9 +169,15 @@ final class BulkInserter
     +/
     void add(T)(auto ref T value) if (is(T == struct))
     {
-        enum fields = columnNames!T;
-        checkColumns(fields);
-        addParameters(fieldParameters(value));
+        static immutable string[] fields = columnNames!T;
+        if (checkedFields !is fields) // checked once per struct type in a row
+        {
+            checkColumns(fields);
+            checkedFields = fields;
+        }
+        Parameter[fields.length] values; // addParameters doesn't keep them
+        fieldParametersInto(value, values[]);
+        addParameters(values[]);
     }
 
     /// ditto
@@ -184,7 +199,7 @@ final class BulkInserter
                     ~ "create it with Connection.bulkInsert!T, or give the columns in field order");
     }
 
-    private void addParameters(const Parameter[] values) @safe
+    private void addParameters(scope const Parameter[] values) @safe
     {
         import std.conv : to;
 
@@ -194,6 +209,7 @@ final class BulkInserter
                     "A row of " ~ values.length.to!string ~ " values for " ~ names.length.to!string
                     ~ " columns");
         row.length = 0;
+        (() @trusted => row.assumeSafeAppend())(); // the previous row was sent (putBulkData copies it)
         row ~= 0xD1; // ROW
         foreach (i, ref v; values)
         {

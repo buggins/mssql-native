@@ -8,8 +8,9 @@ module mssql.prepared;
 
 import mssql.connection : Connection;
 import mssql.exception : ClientException;
-import mssql.params : Parameter, declarations, numbered, parameters, rewritePlaceholders;
-import mssql.protocol.rpc : OutputParameter, ProcId;
+import mssql.params : Parameter, parameters, rewritePlaceholders;
+import mssql.protocol.packet : PacketWriter;
+import mssql.protocol.rpc : OutputParameter, ProcId, putParameter, putTextParameter;
 import mssql.result : QueryResult;
 
 /++
@@ -127,20 +128,37 @@ final class PreparedStatement
         if (params.length != count)
             throw new ClientException("The statement has " ~ count.to!string ~ " placeholders but "
                     ~ params.length.to!string ~ " arguments were given");
-        auto values = numbered(params);
-        const decl = declarations(values);
+        const decl = conn.declarationsOf(params); // valid until the next request is built
         if (handle != 0 && decl != preparedDeclarations)
             close(); // the types changed: prepare again
+        const collation = conn.collation;
         if (handle != 0)
         {
-            conn.sendRpc(null, ProcId.execute, [Parameter.of(handle)] ~ values);
+            const handleParameter = Parameter.of(handle);
+            void executeHead(PacketWriter w) @safe
+            {
+                putParameter(w, handleParameter, collation);
+            }
+
+            conn.sendSystemRpc(ProcId.execute, &executeHead, params);
             return false;
         }
-        preparedDeclarations = decl;
-        conn.sendRpc(null, ProcId.prepExec, [
-            Parameter.outputOf!int(), count ? Parameter.of(decl) : Parameter.nullOf!string(),
-            Parameter.of(text)
-        ] ~ values);
+        preparedDeclarations = decl.idup;
+        void prepExecHead(PacketWriter w) @safe
+        {
+            const handleOutput = Parameter.outputOf!int();
+            putParameter(w, handleOutput, collation);
+            if (count)
+                putTextParameter(w, decl, collation);
+            else
+            {
+                const none = Parameter.nullOf!string();
+                putParameter(w, none, collation);
+            }
+            putTextParameter(w, text, collation);
+        }
+
+        conn.sendSystemRpc(ProcId.prepExec, &prepExecHead, params);
         return true;
     }
 

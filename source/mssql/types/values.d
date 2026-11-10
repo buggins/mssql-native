@@ -16,7 +16,7 @@ import dbwire.types.decimal : Decimal;
 import mssql.exception : ClientException;
 import dbwire.charset.utf16 : decodeUtf16le;
 import mssql.types.temporal : TemporalKind, decodeTemporal, isTemporal;
-import mssql.types.typeinfo : Collation, TdsType, TypeInfo, ValueFormat, rowversionUserType;
+import mssql.types.typeinfo : Collation, TdsType, TypeInfo, ValueFormat, hexDigits, rowversionUserType;
 
 /// Whether values of type `t` are integers (or `bit`).
 bool isInteger(const ref TypeInfo t) @safe pure nothrow @nogc
@@ -87,7 +87,16 @@ long integerValue(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe
         return fromBigEndian!long(bytes[0 .. 8]);
     }
     if (isDecimal(t) || isMoney(t))
-        return decimalValue(t, bytes).toLong();
+    {
+        const u = smallUnscaled(t, bytes);
+        if (u.valid && u.scale < pow10.length)
+        {
+            const whole = u.magnitude / pow10[u.scale]; // truncated towards zero
+            if (whole <= long.max)
+                return u.negative ? -cast(long) whole : cast(long) whole;
+        }
+        return decimalValue(t, bytes).toLong(); // large or invalid: throws
+    }
     if (!isInteger(t))
         throw unsupported(t, "an integer");
     switch (bytes.length)
@@ -118,7 +127,16 @@ double floatValue(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe
     if (isInteger(t))
         return cast(double) integerValue(t, bytes);
     if (isDecimal(t) || isMoney(t))
+    {
+        const u = smallUnscaled(t, bytes);
+        if (u.valid && u.magnitude <= 1UL << 53 && u.scale < exactPow10.length)
+        {
+            // both operands are exact doubles, so one division rounds correctly
+            const d = u.magnitude / exactPow10[u.scale];
+            return u.negative ? -d : d;
+        }
         return decimalValue(t, bytes).toDouble();
+    }
     if (!isFloat(t))
         throw unsupported(t, "a floating-point number");
     if (bytes.length == 4)
@@ -148,15 +166,9 @@ Decimal decimalValue(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe
         return Decimal.fromLong(integerValue(t, bytes));
     if (isMoney(t))
     {
-        // money: the high 32 bits, then the low 32 bits of value × 10^4; smallmoney: an int
-        long v;
-        if (bytes.length == 8)
-            v = (cast(long) fromLittleEndian!int(bytes[0 .. 4]) << 32) | fromLittleEndian!uint(bytes[4 .. 8]);
-        else if (bytes.length == 4)
-            v = fromLittleEndian!int(bytes[0 .. 4]);
-        else
+        if (bytes.length != 8 && bytes.length != 4)
             throw new ClientException("Invalid " ~ t.name ~ " value");
-        return Decimal(Int256(v), 4);
+        return Decimal(Int256(moneyUnscaled(bytes)), 4);
     }
     if (!isDecimal(t))
         throw unsupported(t, "a decimal");
@@ -179,6 +191,68 @@ Decimal decimalValue(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe
     }
     return Decimal(unscaled, t.scale);
 }
+
+// money (8 bytes): the high 32 bits, then the low 32 bits of value × 10^4; smallmoney (4 bytes): an int
+private long moneyUnscaled(scope const(ubyte)[] bytes) @safe pure nothrow @nogc
+in (bytes.length == 8 || bytes.length == 4)
+{
+    if (bytes.length == 4)
+        return fromLittleEndian!int(bytes[0 .. 4]);
+    return (cast(long) fromLittleEndian!int(bytes[0 .. 4]) << 32) | fromLittleEndian!uint(bytes[4 .. 8]);
+}
+
+// A decimal or money value as sign, magnitude and scale
+private struct Unscaled
+{
+    bool valid; // false: the magnitude needs more than 64 bits, or the bytes are invalid
+    bool negative;
+    ulong magnitude;
+    uint scale;
+}
+
+private Unscaled smallUnscaled(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe pure nothrow @nogc
+{
+    Unscaled u;
+    if (isMoney(t))
+    {
+        if (bytes.length != 8 && bytes.length != 4)
+            return u;
+        const v = moneyUnscaled(bytes);
+        u.negative = v < 0;
+        u.magnitude = u.negative ? -cast(ulong) v : v;
+        u.scale = 4;
+        u.valid = true;
+        return u;
+    }
+    // a sign byte (1 positive, 0 negative), then the little-endian magnitude
+    if (bytes.length < 2 || bytes.length > 17 || bytes[0] > 1)
+        return u;
+    const end = bytes.length < 9 ? bytes.length : 9;
+    foreach (b; bytes[end .. $])
+        if (b != 0)
+            return u;
+    foreach_reverse (b; bytes[1 .. end])
+        u.magnitude = (u.magnitude << 8) | b;
+    u.negative = bytes[0] == 0 && u.magnitude != 0; // no negative zero
+    u.scale = t.scale;
+    u.valid = true;
+    return u;
+}
+
+private static immutable ulong[20] pow10 = () {
+    ulong[20] p = 1;
+    foreach (i; 1 .. p.length)
+        p[i] = p[i - 1] * 10;
+    return p;
+}();
+
+// 10^0 to 10^22: the powers of ten a double holds exactly
+private static immutable double[23] exactPow10 = () {
+    double[23] p = 1;
+    foreach (i; 1 .. p.length)
+        p[i] = p[i - 1] * 10;
+    return p;
+}();
 
 /++
 The `uniqueidentifier` in `bytes`. The first three groups are little-endian on
@@ -219,8 +293,6 @@ Throws: `ClientException` for types without a text form yet, and for
 +/
 string textValue(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe
 {
-    import std.uni : toUpper;
-
     switch (t.type)
     {
     case TdsType.nvarchar:
@@ -235,7 +307,7 @@ string textValue(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe
     case TdsType.text:
         return eightBitText(t, bytes);
     case TdsType.guid:
-        return uuidValue(t, bytes).toString().toUpper;
+        return guidText(t, bytes);
     default:
         if (isInteger(t))
             return integerValue(t, bytes).to!string;
@@ -428,11 +500,40 @@ private string shortestText(double value, bool single) @safe pure nothrow
     assert(shortestText(-36_681_927_456_064_224.0, false) == "-36681927456064224"); // not the tie -3.668192745606422e+16
 }
 
-private string hexText(scope const(ubyte)[] bytes) @safe pure
+// `0x` and two upper-case hex digits per byte
+private string hexText(scope const(ubyte)[] bytes) @safe pure nothrow
 {
-    import std.format : format;
+    static char[] build(scope const(ubyte)[] bytes) @safe pure nothrow
+    {
+        auto r = new char[2 + 2 * bytes.length];
+        r[0 .. 2] = "0x";
+        foreach (i, b; bytes)
+        {
+            r[2 + 2 * i] = hexDigits[b >> 4];
+            r[3 + 2 * i] = hexDigits[b & 15];
+        }
+        return r;
+    }
 
-    return format("0x%(%02X%)", bytes);
+    return build(bytes); // a new array from a pure function: unique, so it converts
+}
+
+// A uniqueidentifier as SQL Server writes it: the first three groups little-endian, upper-case hex
+private string guidText(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe pure
+{
+    static immutable ubyte[16] order = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15];
+    if (bytes.length != 16)
+        throw new ClientException("Invalid " ~ t.name ~ " value");
+    char[36] r;
+    size_t n;
+    foreach (i, k; order)
+    {
+        if (i == 4 || i == 6 || i == 8 || i == 10)
+            r[n++] = '-';
+        r[n++] = hexDigits[bytes[k] >> 4];
+        r[n++] = hexDigits[bytes[k] & 15];
+    }
+    return r[].idup;
 }
 
 private ClientException unsupported(const ref TypeInfo t, string target) @safe pure
@@ -583,4 +684,49 @@ unittest  // Variant.get is @system
     assert(variantValue(date, [0x63, 0x46, 0x0B]).get!Date == Date(2024, 1, 31));
     auto varchar = TypeInfo(TdsType.bigVarchar, ValueFormat.ushortLength, 10);
     assert(variantValue(varchar, cast(const(ubyte)[]) "abc").get!string == "abc");
+}
+
+// The 64-bit paths of getLong/getDouble agree with the Decimal ones
+@safe unittest
+{
+    import std.exception : assertThrown;
+    import std.math : signbit;
+    import std.random : Mt19937_64, uniform;
+    import dbwire.io.buffer : toLittleEndian;
+
+    auto rng = Mt19937_64(42);
+    foreach (round; 0 .. 20_000)
+    {
+        const ulong m = round % 3 == 0 ? uniform(0UL, 1UL << 53, rng) : round % 3 == 1 ? uniform(0UL, ulong.max, rng)
+            : uniform(0UL, 1_000_000, rng);
+        const ubyte scale = cast(ubyte) uniform(0, 39, rng);
+        auto t = TypeInfo(TdsType.decimalN, ValueFormat.byteLength, 17);
+        t.scale = scale;
+        ubyte[17] bytes;
+        bytes[0] = round & 1;
+        bytes[1 .. 9] = toLittleEndian(m);
+        const d = decimalValue(t, bytes[]);
+        assert(floatValue(t, bytes[]) == d.toDouble());
+        long whole;
+        bool fits = true;
+        try
+            whole = d.toLong();
+        catch (Exception)
+            fits = false;
+        if (fits)
+            assert(integerValue(t, bytes[]) == whole);
+        else
+            assertThrown!ClientException(integerValue(t, bytes[]));
+        // smallmoney and money
+        const long v = cast(long) m;
+        const mt = TypeInfo(TdsType.moneyN, ValueFormat.byteLength, 8);
+        ubyte[8] mb;
+        mb[0 .. 4] = toLittleEndian(cast(int)(v >> 32));
+        mb[4 .. 8] = toLittleEndian(cast(uint) v);
+        const md = decimalValue(mt, mb[]);
+        assert(floatValue(mt, mb[]) == md.toDouble() && integerValue(mt, mb[]) == md.toLong());
+    }
+    auto z = TypeInfo(TdsType.decimalN, ValueFormat.byteLength, 5);
+    const ubyte[5] negativeZero = [0, 0, 0, 0, 0];
+    assert(floatValue(z, negativeZero[]) == 0 && !floatValue(z, negativeZero[]).signbit);
 }

@@ -187,12 +187,20 @@ private Parameter typeOf(T)()
         static assert(0, "Parameters of type " ~ T.stringof ~ " are not supported");
 }
 
-private Parameter decimalType(int scale) @safe pure
-{
+// decimal(38,0) to decimal(38,38)
+private static immutable string[39] decimalDeclarations = () {
     import std.conv : to;
 
-    auto p = typed(TdsType.decimalN, ValueFormat.byteLength, 17,
-            "decimal(38," ~ scale.to!string ~ ")", cast(ubyte) scale);
+    string[39] d;
+    foreach (scale, ref s; d)
+        s = "decimal(38," ~ scale.to!string ~ ")";
+    return d;
+}();
+
+private Parameter decimalType(int scale) @safe pure nothrow
+in (scale >= 0 && scale <= 38)
+{
+    auto p = typed(TdsType.decimalN, ValueFormat.byteLength, 17, decimalDeclarations[scale], cast(ubyte) scale);
     p.type.precision = 38;
     return p;
 }
@@ -260,7 +268,7 @@ private Parameter make(T)(T value)
     else static if (is(U == DateTime))
     {
         const t = value.timeOfDay;
-        p.data = littleEndian((t.hour * 3600L + t.minute * 60 + t.second) * 10_000_000, 5) ~ days(value.date);
+        p.data = timeAndDate((t.hour * 3600L + t.minute * 60 + t.second) * 10_000_000, dayNumber(value.date));
     }
     else static if (is(U == SysTime))
     {
@@ -270,8 +278,7 @@ private Parameter make(T)(T value)
         const std = value.stdTime; // 100 ns units since 0001-01-01 UTC
         if (std < 0 || std >= 3_652_059 * 864_000_000_000L)
             throw new ClientException("A SysTime parameter must be in the years 1 to 9999");
-        p.data = littleEndian(std % 864_000_000_000L, 5) ~ littleEndian(std / 864_000_000_000L, 3) ~ littleEndian(
-                offset, 2);
+        p.data = timeAndDate(std % 864_000_000_000L, std / 864_000_000_000L, offset);
     }
     else static if (is(U == UUID))
     {
@@ -360,10 +367,29 @@ private Parameter ofVariant(ref const Variant value) @safe
 /// Days since 0001-01-01, in 3 bytes.
 private immutable(ubyte)[] days(const Date date) @safe pure
 {
+    return littleEndian(dayNumber(date), 3);
+}
+
+/// Days since 0001-01-01.
+private long dayNumber(const Date date) @safe pure
+{
     const day = date.dayOfGregorianCal - 1;
     if (day < 0 || day > Date(9999, 12, 31).dayOfGregorianCal - 1) // 3 bytes would wrap around
         throw new ClientException("Date " ~ date.toISOExtString() ~ " is outside SQL Server's range (0001 to 9999)");
-    return littleEndian(day, 3);
+    return day;
+}
+
+/// datetime2(7) bytes: `ticks` since midnight (5 bytes), days (3 bytes); with `offset` minutes
+/// (2 bytes) for datetimeoffset(7).
+private immutable(ubyte)[] timeAndDate(long ticks, long days, long offset = long.min) @safe pure nothrow
+{
+    ubyte[10] b;
+    b[0 .. 5] = toLittleEndian(ticks)[0 .. 5];
+    b[5 .. 8] = toLittleEndian(days)[0 .. 3];
+    if (offset == long.min)
+        return b[0 .. 8].idup;
+    b[8 .. 10] = toLittleEndian(offset)[0 .. 2];
+    return b[].idup;
 }
 
 /// `value` as `n` (at most 8) little-endian bytes.
@@ -420,6 +446,7 @@ private auto bigUnsigned(ulong value) @safe
         0xFF, 0x19, 0x96, 0x6F, 0x86, 0x8B, 0x11, 0xD0, 0xB4, 0x2D, 0x00, 0xC0, 0x4F, 0xC9, 0x64, 0xFF
     ]);
     assert(Parameter.of(ulong.max).declaration == "decimal(38,0)");
+    assert(Parameter.of(Decimal.fromString("1.25")).declaration == "decimal(38,2)");
     assert(Parameter.of("x".replicate(4001)).declaration == "nvarchar(max)");
     assert(Parameter.of(new ubyte[8001]).declaration == "varbinary(max)");
 }
@@ -444,9 +471,9 @@ is left alone.
 string rewritePlaceholders(string sql, out size_t count) @safe pure
 {
     import std.array : appender;
-    import std.conv : to;
 
     auto result = appender!string();
+    result.reserve(sql.length + 16);
     size_t i;
     size_t copied;
     void flush(size_t upTo)
@@ -505,7 +532,8 @@ string rewritePlaceholders(string sql, out size_t count) @safe pure
         else if (c == '?')
         {
             flush(i);
-            result ~= "@p" ~ (++count).to!string;
+            char[24] name;
+            result ~= name[0 .. parameterName(++count, name)];
             i++;
             copied = i;
         }
@@ -562,13 +590,17 @@ package Parameter withDecimalScale(const Parameter p, ubyte scale) @safe
     assert(withDecimalScale(Parameter.nullOf!Decimal, 2).declaration == "decimal(38,2)");
 }
 
+/// Whether `Args` is one `Parameter[]` (taken as the parameters themselves); a lone `null` is not.
+package enum bool isParameterArray(Args...) = Args.length == 1 && is(Args[0] : const(Parameter)[])
+    && !is(Args[0] == typeof(null));
+
 /++
 The parameters for `args`, each converted with `Parameter.of`; a single
 `Parameter[]` argument is taken as the parameters themselves.
 +/
 const(Parameter)[] parameters(Args...)(auto ref Args args)
 {
-    static if (Args.length == 1 && is(Args[0] : const(Parameter)[]) && !is(Args[0] == typeof(null)))
+    static if (isParameterArray!Args)
         return args[0];
     else
         return convertAll(args);
@@ -596,11 +628,71 @@ Parameter[] numbered(const Parameter[] params) @safe pure nothrow
     return result;
 }
 
+/// Writes `@p<number>` into `buffer`; returns its length.
+package size_t parameterName(size_t number, ref char[24] buffer) @safe pure nothrow @nogc
+{
+    char[20] digits;
+    size_t d;
+    do
+    {
+        digits[d++] = cast(char)('0' + number % 10);
+        number /= 10;
+    }
+    while (number);
+    buffer[0 .. 2] = "@p";
+    foreach (k; 0 .. d)
+        buffer[2 + k] = digits[d - 1 - k];
+    return 2 + d;
+}
+
+/++
+The declaration of `params` named `@p1`, `@p2`, ... (as `declarations(numbered(params))`),
+written into `buffer`, which is reused: the result is valid until the next call with it.
++/
+package const(char)[] numberedDeclarations(const Parameter[] params, ref char[] buffer) @safe nothrow
+{
+    buffer.length = 0;
+    (() @trusted => buffer.assumeSafeAppend())(); // the caller is done with the previous declaration
+    foreach (i, ref p; params)
+    {
+        char[24] name;
+        declare(buffer, i, name[0 .. parameterName(i + 1, name)], p);
+    }
+    return buffer;
+}
+
+// Appends `name type[ OUTPUT]` (after a comma unless `i` is 0)
+private void declare(ref char[] s, size_t i, scope const(char)[] name, const ref Parameter p) @safe pure nothrow
+{
+    if (i)
+        s ~= ',';
+    s ~= name;
+    s ~= ' ';
+    s ~= p.declaration;
+    if (p.isOutput)
+        s ~= " OUTPUT";
+}
+
+@safe unittest
+{
+    char[24] name;
+    assert(name[0 .. parameterName(1, name)] == "@p1" && name[0 .. parameterName(2100, name)] == "@p2100");
+    char[] buffer;
+    auto params = [Parameter.of(1), Parameter.outputOf!string(), Parameter.of(2.5)];
+    assert(numberedDeclarations(params, buffer) == declarations(numbered(params)));
+    assert(numberedDeclarations(params[0 .. 1], buffer) == "@p1 int" && numberedDeclarations(null, buffer) == "");
+}
+
 /// The `@params` declaration of `sp_executesql`: `@p1 int, @p2 nvarchar(4000) OUTPUT`.
 string declarations(const Parameter[] params) @safe pure nothrow
 {
-    string s;
-    foreach (i, ref p; params)
-        s ~= (i ? "," : "") ~ p.name ~ " " ~ p.declaration ~ (p.isOutput ? " OUTPUT" : "");
-    return s;
+    static char[] build(const Parameter[] params) @safe pure nothrow
+    {
+        char[] s;
+        foreach (i, ref p; params)
+            declare(s, i, p.name, p);
+        return s;
+    }
+
+    return build(params); // a new array from a pure function: unique, so it converts
 }

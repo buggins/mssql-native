@@ -327,16 +327,15 @@ struct RowRange(T) if (is(T == struct))
     }
 }
 
-/// The parameters of the mapped fields of `value`, in field order.
-package Parameter[] fieldParameters(T)(const ref T value)
+/// The parameters of the mapped fields of `value`, in field order, into `params` (one per field).
+package void fieldParametersInto(T)(const ref T value, Parameter[] params)
 {
-    Parameter[] params;
+    size_t i;
     static foreach (name; FieldNameTuple!T)
     {
         static if (!hasUDA!(__traits(getMember, T, name), IgnoreField))
-            params ~= Parameter.of(__traits(getMember, value, name));
+            params[i++] = Parameter.of(__traits(getMember, value, name));
     }
-    return params;
 }
 
 /// `name` as a bracketed T-SQL identifier (`]` doubled).
