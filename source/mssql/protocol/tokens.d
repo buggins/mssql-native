@@ -7,7 +7,7 @@ License:   $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0).
 +/
 module mssql.protocol.tokens;
 
-import dbwire.io.buffer : BufferedReader;
+import dbwire.io.buffer : BufferedReader, fromBigEndian;
 import mssql.exception : ProtocolException, ServerMessage;
 import dbwire.charset.utf16 : decodeUtf16le;
 
@@ -242,11 +242,11 @@ LoginAck readLoginAck(BufferedReader r) @safe
     p.u8(); // interface: SQL_TSQL
     // TDSVersion: the server's value, e.g. 0x74000004 (bytes 74 00 00 04)
     const v = p.bytes(4);
-    ack.tdsVersion = (v[0] << 24) | (v[1] << 16) | (v[2] << 8) | v[3];
+    ack.tdsVersion = fromBigEndian!uint(v[0 .. 4]);
     ack.programName = p.bVarchar();
     ack.majorVersion = p.u8();
     ack.minorVersion = p.u8();
-    ack.build = cast(ushort)((p.u8() << 8) | p.u8());
+    ack.build = fromBigEndian!ushort(p.bytes(2)[0 .. 2]);
     return ack;
 }
 

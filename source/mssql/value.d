@@ -100,7 +100,7 @@ struct Value
     }
 
     /// The raw bytes, as the server sent them (a copy).
-    ubyte[] getBytes() const @safe
+    ubyte[] getBytes() const @safe pure nothrow
     {
         return isNull ? null : bytes.dup;
     }
@@ -111,7 +111,7 @@ struct Value
 
     Throws: `ClientException` for other types.
     +/
-    Date getDate() const @safe
+    Date getDate() const @safe pure
     {
         Temporal t;
         return temporal(t) ? t.date : Date.init;
@@ -123,7 +123,7 @@ struct Value
 
     Throws: `ClientException` for other types.
     +/
-    TimeOfDay getTime() const @safe
+    TimeOfDay getTime() const @safe pure
     {
         Temporal t;
         return temporal(t) ? t.timeOfDay : TimeOfDay.init;
@@ -135,7 +135,7 @@ struct Value
 
     Throws: `ClientException` for other types.
     +/
-    Duration getDuration() const @safe
+    Duration getDuration() const @safe pure
     {
         Temporal t;
         return temporal(t) ? t.sinceMidnight : Duration.zero;
@@ -147,7 +147,7 @@ struct Value
 
     Throws: `ClientException` for other types.
     +/
-    DateTime getDateTime() const @safe
+    DateTime getDateTime() const @safe pure
     {
         Temporal t;
         if (!temporal(t))
@@ -164,7 +164,7 @@ struct Value
 
     Throws: `ClientException` for other types.
     +/
-    SysTime getSysTime() const @safe
+    SysTime getSysTime() const @safe pure
     {
         Temporal t;
         if (!temporal(t))
@@ -201,7 +201,7 @@ struct Value
 
     Throws: `ClientException` if a `sql_variant` value is malformed.
     +/
-    @property Value base() const @safe
+    @property Value base() const @safe pure
     {
         if (isNull || type.type != TdsType.variant)
             return Value(type, bytes, isNull);
@@ -211,7 +211,7 @@ struct Value
         return Value(inner, data, false);
     }
 
-    private bool temporal(out Temporal t) const @safe
+    private bool temporal(out Temporal t) const @safe pure
     {
         if (isNull)
             return false;

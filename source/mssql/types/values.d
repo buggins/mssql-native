@@ -7,8 +7,11 @@ License:   $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0).
 +/
 module mssql.types.values;
 
+import std.conv : to;
+import std.traits : hasElaborateCopyConstructor, hasElaborateDestructor;
 import std.uuid : UUID;
 import std.variant : Variant;
+import dbwire.io.buffer : fromLittleEndian;
 import dbwire.types.decimal : Decimal;
 import mssql.exception : ClientException;
 import dbwire.charset.utf16 : decodeUtf16le;
@@ -78,11 +81,10 @@ long integerValue(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe
 {
     if (t.userType == rowversionUserType && bytes.length == 8)
     {
+        import dbwire.io.buffer : fromBigEndian;
+
         // rowversion: a big-endian counter (CAST(rv AS bigint))
-        ulong v;
-        foreach (b; bytes)
-            v = (v << 8) | b;
-        return cast(long) v;
+        return fromBigEndian!long(bytes[0 .. 8]);
     }
     if (isDecimal(t) || isMoney(t))
         return decimalValue(t, bytes).toLong();
@@ -93,11 +95,13 @@ long integerValue(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe
     case 1:
         return bytes[0]; // tinyint is unsigned
     case 2:
+        return fromLittleEndian!short(bytes[0 .. 2]);
     case 4:
+        return fromLittleEndian!int(bytes[0 .. 4]);
     case 8:
-        return littleEndian(bytes);
+        return fromLittleEndian!long(bytes[0 .. 8]);
     default:
-        throw new ClientException("Invalid integer of " ~ toText(bytes.length) ~ " bytes");
+        throw new ClientException("Invalid integer of " ~ bytes.length.to!string ~ " bytes");
     }
 }
 
@@ -127,7 +131,7 @@ double floatValue(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe
         const ubyte[8] b = bytes[0 .. 8];
         return littleEndianToNative!double(b);
     }
-    throw new ClientException("Invalid floating-point value of " ~ toText(bytes.length) ~ " bytes");
+    throw new ClientException("Invalid floating-point value of " ~ bytes.length.to!string ~ " bytes");
 }
 
 /++
@@ -147,9 +151,9 @@ Decimal decimalValue(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe
         // money: the high 32 bits, then the low 32 bits of value × 10^4; smallmoney: an int
         long v;
         if (bytes.length == 8)
-            v = (littleEndian(bytes[0 .. 4]) << 32) | (littleEndian(bytes[4 .. 8]) & 0xFFFF_FFFF);
+            v = (cast(long) fromLittleEndian!int(bytes[0 .. 4]) << 32) | fromLittleEndian!uint(bytes[4 .. 8]);
         else if (bytes.length == 4)
-            v = littleEndian(bytes);
+            v = fromLittleEndian!int(bytes[0 .. 4]);
         else
             throw new ClientException("Invalid " ~ t.name ~ " value");
         return Decimal(Int256(v), 4);
@@ -215,7 +219,6 @@ Throws: `ClientException` for types without a text form yet, and for
 +/
 string textValue(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe
 {
-    import std.conv : to;
     import std.uni : toUpper;
 
     switch (t.type)
@@ -305,14 +308,19 @@ Variant variantValue(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe
     return makeVariant(textValue(t, bytes));
 }
 
-/// Wraps `value` in a `Variant` (whose constructor is `@system` for some types).
-Variant makeVariant(T)(T value) @trusted
+/++
+Wraps `value` in a `Variant`: memory-safe, but `std.variant` is not annotated
+`@safe`. Only for types whose copy and destruction are plain (the attribute
+would hide a `@system` postblit, copy constructor or destructor of `T`).
++/
+package(mssql) Variant makeVariant(T)(T value) @trusted
+        if (!hasElaborateCopyConstructor!T && !hasElaborateDestructor!T)
 {
     return Variant(value);
 }
 
 /// `char`/`varchar` text in the code page of the column collation.
-private string eightBitText(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe
+private string eightBitText(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe pure
 {
     import dbwire.charset.codepage : CodePage;
     import mssql.types.collations : codePageOf;
@@ -323,12 +331,12 @@ private string eightBitText(const ref TypeInfo t, scope const(ubyte)[] bytes) @s
             const number = codePageOf(t.collation);
             CodePage page;
             if (number <= 0 || !CodePage.find(number, page))
-                throw new ClientException("Text in code page " ~ (number < 0 ? "?" : toText(number))
-                        ~ " (collation LCID 0x" ~ hex(t.collation.lcid) ~ ", sort id " ~ toText(
-                            t.collation.sortId) ~ ") is not supported; use nvarchar or a UTF-8 collation");
+                throw new ClientException("Text in code page " ~ (number < 0 ? "?" : number.to!string)
+                        ~ " (collation LCID 0x" ~ t.collation.lcid.to!string(16) ~ ", sort id " ~ t.collation
+                            .sortId.to!string ~ ") is not supported; use nvarchar or a UTF-8 collation");
             return page.decode(bytes);
         }
-    return (() @trusted => cast(string) bytes.idup)(); // ASCII is UTF-8
+    return cast(string) bytes.idup; // ASCII is UTF-8
 }
 
 /++
@@ -427,16 +435,6 @@ private string hexText(scope const(ubyte)[] bytes) @safe pure
     return format("0x%(%02X%)", bytes);
 }
 
-/// A signed little-endian integer of 1 to 8 bytes.
-private long littleEndian(scope const(ubyte)[] bytes) @safe pure nothrow @nogc
-{
-    ulong v;
-    foreach_reverse (b; bytes)
-        v = (v << 8) | b;
-    const bits = 8 * bytes.length;
-    return bits < 64 && (v >> (bits - 1)) & 1 ? cast(long)(v | (ulong.max << bits)) : cast(long) v;
-}
-
 private ClientException unsupported(const ref TypeInfo t, string target) @safe pure
 {
     if (t.type == TdsType.udt)
@@ -452,7 +450,7 @@ collation and maximum length), then the value ([MS-TDS] 2.2.5.5.4).
 
 Throws: `ClientException` if the value is malformed.
 +/
-void unwrapVariant(const(ubyte)[] bytes, out TypeInfo inner, out const(ubyte)[] data) @safe
+void unwrapVariant(const(ubyte)[] bytes, out TypeInfo inner, out const(ubyte)[] data) @safe pure
 {
     if (bytes.length < 2 || bytes.length < 2 + bytes[1])
         throw new ClientException("Invalid sql_variant value");
@@ -488,20 +486,6 @@ void unwrapVariant(const(ubyte)[] bytes, out TypeInfo inner, out const(ubyte)[] 
     default:
         break;
     }
-}
-
-private string hex(uint v) @safe pure
-{
-    import std.format : format;
-
-    return format("%X", v);
-}
-
-private string toText(T)(T value) @safe pure
-{
-    import std.conv : to;
-
-    return value.to!string;
 }
 
 ///

@@ -40,7 +40,7 @@ import mssql.protocol.rpc : OutputParameter, ProcId, checkRpc, putParameter, put
 import mssql.protocol.tokens;
 import mssql.result : QueryResult;
 import mssql.settings : ConnectionOptions, HostPort;
-import mssql.types.typeinfo : Collation, ColumnInfo, TdsType, ValueRef, readColumnMetadata, readValue;
+import mssql.types.typeinfo : Collation, ColumnInfo, TdsType, ValueRef, hexByte, readColumnMetadata, readValue;
 
 /++
 One connection to SQL Server.
@@ -209,7 +209,7 @@ final class Connection : Poolable
     differ, or for a value that can't be sent; `ServerException` if a
     statement failed.
     +/
-    ulong exec(Args...)(string sql, Args args) if (Args.length > 0)
+    ulong exec(Args...)(string sql, auto ref Args args) if (Args.length > 0)
     {
         return execParams(sql, parameters(args));
     }
@@ -280,7 +280,7 @@ final class Connection : Poolable
 
     Throws: as `exec`.
     +/
-    QueryResult query(Args...)(string sql, Args args) if (Args.length > 0)
+    QueryResult query(Args...)(string sql, auto ref Args args) if (Args.length > 0)
     {
         return queryParams(sql, parameters(args));
     }
@@ -300,7 +300,7 @@ final class Connection : Poolable
 
     Throws: as `exec`.
     +/
-    QueryResult queryMultiple(Args...)(string sql, Args args)
+    QueryResult queryMultiple(Args...)(string sql, auto ref Args args)
     {
         return queryParams(sql, parameters(args), true);
     }
@@ -316,7 +316,7 @@ final class Connection : Poolable
     closed), its `outputs` and `returnStatus`.
     Throws: `ServerException` if the procedure failed.
     +/
-    QueryResult callProcedure(Args...)(string name, Args args)
+    QueryResult callProcedure(Args...)(string name, auto ref Args args)
     {
         return callParams(name, parameters(args));
     }
@@ -336,7 +336,7 @@ final class Connection : Poolable
 
     Throws: `ClientException` if a field has no column; as `exec`.
     +/
-    RowRange!T query(T, Args...)(string sql, Args args) if (is(T == struct))
+    RowRange!T query(T, Args...)(string sql, auto ref Args args) if (is(T == struct))
     {
         return RowRange!T(run(sql, args));
     }
@@ -346,7 +346,7 @@ final class Connection : Poolable
 
     Throws: `ClientException` if there is no row or a field has no column; as `exec`.
     +/
-    T queryRow(T, Args...)(string sql, Args args) if (is(T == struct))
+    T queryRow(T, Args...)(string sql, auto ref Args args) if (is(T == struct))
     {
         auto result = run(sql, args);
         scope (exit)
@@ -365,7 +365,7 @@ final class Connection : Poolable
     Throws: `ClientException` if there is no row, or the value can't be
     converted; as `exec`.
     +/
-    T queryValue(T, Args...)(string sql, Args args)
+    T queryValue(T, Args...)(string sql, auto ref Args args)
     {
         auto result = run(sql, args);
         scope (exit)
@@ -469,10 +469,16 @@ final class Connection : Poolable
     /// ditto
     ulong insert(T)(string table, T row) if (is(T == struct) && !isInputRange!T)
     {
-        return insert(table, (&row)[0 .. 1]);
+        import std.range : only;
+        import std.traits : isCopyable;
+
+        static if (isCopyable!T)
+            return insert(table, only(row));
+        else
+            return insert(table, (&row)[0 .. 1]); // @system: the slice points to the parameter
     }
 
-    private QueryResult run(Args...)(string sql, Args args)
+    private QueryResult run(Args...)(string sql, auto ref Args args)
     {
         static if (Args.length)
             return queryParams(sql, parameters(args));
@@ -622,13 +628,13 @@ final class Connection : Poolable
     /// Rolls back the current transaction, or its part after savepoint `name`.
     void rollback(string name = null) @safe
     {
-        exec(name.length ? "ROLLBACK TRANSACTION " ~ quoteName(name) : "ROLLBACK TRANSACTION");
+        exec(name.length ? "ROLLBACK TRANSACTION " ~ quoteIdentifier(name) : "ROLLBACK TRANSACTION");
     }
 
     /// Sets a savepoint called `name` in the current transaction (`rollback(name)` returns to it).
     void savepoint(string name) @safe
     {
-        exec("SAVE TRANSACTION " ~ quoteName(name));
+        exec("SAVE TRANSACTION " ~ quoteIdentifier(name));
     }
 
     /// Sets the isolation level of the session's next transactions (`SET TRANSACTION ISOLATION LEVEL`).
@@ -840,7 +846,9 @@ final class Connection : Poolable
         if (values.length != columns.length)
             values = new ValueRef[columns.length];
         data.length = 0;
-        (() @trusted => data.assumeSafeAppend())(); // the previous row's bytes are no longer referenced
+        // Values of the previous row may still view these bytes, but only as const(ubyte)[] (documented as
+        // valid until the next row); nothing makes an immutable slice of them, so overwriting them is safe
+        (() @trusted => data.assumeSafeAppend())();
         ubyte[] bitmap;
         if (nullBitmap)
             bitmap = reader.readExactBytes((columns.length + 7) / 8).dup;
@@ -1094,12 +1102,11 @@ final class Connection : Poolable
 
     private static ulong descriptor(scope const(ubyte)[] bytes) @safe
     {
+        import dbwire.io.buffer : fromLittleEndian;
+
         if (bytes.length != 8)
             throw new ProtocolException("Invalid transaction descriptor");
-        ulong v;
-        foreach_reverse (b; bytes)
-            v = (v << 8) | b;
-        return v;
+        return fromLittleEndian!ulong(bytes[0 .. 8]);
     }
 
     // --- connecting ---
@@ -1270,19 +1277,11 @@ private string isolationSql(IsolationLevel level) @safe pure nothrow
     }
 }
 
-/// `name` as a bracketed T-SQL identifier (`]` doubled).
-private string quoteName(string name) @safe pure
-{
-    import std.array : replace;
-
-    return "[" ~ name.replace("]", "]]") ~ "]";
-}
-
-private uint processId() @trusted nothrow
+private uint processId() @safe nothrow
 {
     import std.process : thisProcessID;
 
-    return cast(uint) thisProcessID; // reads the process id
+    return cast(uint) thisProcessID;
 }
 
 private string machineName() @safe nothrow
@@ -1295,12 +1294,6 @@ private string machineName() @safe nothrow
     }
     catch (Exception)
         return "";
-}
-
-private string hexByte(ubyte b) @safe pure nothrow
-{
-    static immutable digits = "0123456789ABCDEF";
-    return [digits[b >> 4], digits[b & 15]];
 }
 
 version (unittest)
@@ -1755,4 +1748,72 @@ version (unittest)
     assertThrown!ClientException(conn.callProcedure("p", Parameter.of(1).named("x".replicate(256))));
     assertThrown!ClientException(Parameter.of(Date(10_000, 1, 1)));
     assert(conn.isOpen && !conn.isBusy && server.written.length == 0);
+}
+
+@safe unittest
+{
+    import std.variant : Variant;
+    import mssql.bulk : BulkInserter;
+    import mssql.mapping : ignore;
+
+    // what @safe code can call (the templates infer their attributes; no server needed)
+    static struct Plain
+    {
+        int id;
+        string name;
+    }
+
+    static struct WithBytes
+    {
+        int id;
+        immutable(ubyte)[] data;
+        ubyte[] copy;
+    }
+
+    static struct EvilCopy
+    {
+        int x;
+        this(this) @system
+        {
+        }
+    }
+
+    static struct WithEvilCopy
+    {
+        int id;
+        @ignore EvilCopy e;
+    }
+
+    static assert(__traits(compiles, (Connection c) @safe { c.insert("t", [Plain(1)]); }));
+    static assert(__traits(compiles, (Connection c) @safe { c.insert("t", Plain(1)); }));
+    static assert(__traits(compiles, (Connection c) @safe {
+            foreach (r; c.query!Plain("q"))
+            {
+            }
+        }));
+    static assert(__traits(compiles, (Connection c) @safe { auto r = c.queryRow!Plain("q", 1); }));
+    static assert(__traits(compiles, (Connection c) @safe { auto r = c.queryRow!WithBytes("q"); }));
+    static assert(__traits(compiles, (Connection c) @safe {
+            auto r = c.queryValue!(immutable(ubyte)[])("q");
+        }));
+    static assert(__traits(compiles, (Connection c, ref Variant v) @safe { c.query("q", v); }));
+    static assert(__traits(compiles, (Connection c, QueryResult r) @safe {
+            c.exec("q", r.getVariant(0));
+        }));
+    static assert(__traits(compiles, (Connection c, ref Variant v) @safe { c.prepare("q").exec(v); }));
+    static assert(__traits(compiles, (BulkInserter b, ref Variant v) @safe {
+            b.addRow(1, v);
+            b.add(Plain(1));
+        }));
+    static assert(!__traits(compiles, (Connection c) @safe { c.insert("t", WithEvilCopy(1)); }));
+    static assert(__traits(compiles, (Connection c) @system { c.insert("t", WithEvilCopy(1)); }));
+
+    static struct NoCopy
+    {
+        int id;
+        @disable this(this);
+    }
+
+    static if (isInputRange!(NoCopy[])) // Phobos 2.097 wants a copyable front
+        static assert(__traits(compiles, (Connection c) @system { c.insert("t", NoCopy(1)); }));
 }

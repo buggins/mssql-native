@@ -124,15 +124,13 @@ T readValue(T)(const Value v)
         {
             // the member's name, or its value in decimal (as `insert` writes enums)
             const text = v.getString();
+            static foreach (member; __traits(allMembers, T))
+                if (text == member)
+                    return __traits(getMember, T, member);
             try
-                return text.to!T;
+                n = text.to!long;
             catch (ConvException)
-            {
-                try
-                    n = text.to!long;
-                catch (ConvException)
-                    throw new ClientException("'" ~ text ~ "' is not a value of " ~ T.stringof);
-            }
+                throw new ClientException("'" ~ text ~ "' is not a value of " ~ T.stringof);
         }
         else
             n = v.getLong();
@@ -155,7 +153,7 @@ T readValue(T)(const Value v)
     else static if (isSomeString!U)
         return v.getString().to!T;
     else static if (is(U : const(ubyte)[]))
-        return cast(T) v.getBytes();
+        return v.getBytes(); // a new array (from a pure function): converts to immutable(ubyte)[] too
     else static if (is(U == Decimal))
         return v.getDecimal();
     else static if (is(U == Date))
@@ -174,7 +172,35 @@ T readValue(T)(const Value v)
         static assert(0, "Fields of type " ~ T.stringof ~ " can't be read");
 }
 
-private bool isTextColumn(const Value v) @safe
+///
+@safe unittest
+{
+    import std.exception : assertThrown;
+    import dbwire.charset.utf16 : encodeUtf16le;
+    import mssql.types.typeinfo : TdsType, TypeInfo, ValueFormat;
+
+    enum Color
+    {
+        red,
+        green = 5
+    }
+
+    const nvarchar = TypeInfo(TdsType.nvarchar, ValueFormat.ushortLength, 20);
+    const int4 = TypeInfo(TdsType.int4, ValueFormat.fixed, 4);
+    assert(readValue!Color(Value(nvarchar, encodeUtf16le("green"), false)) == Color.green); // a name
+    assert(readValue!Color(Value(nvarchar, encodeUtf16le("5"), false)) == Color.green); // a value
+    assert(readValue!Color(Value(int4, [5, 0, 0, 0], false)) == Color.green);
+    assertThrown!ClientException(readValue!Color(Value(nvarchar, encodeUtf16le("blue"), false)));
+    assertThrown!ClientException(readValue!byte(Value(int4, [0, 1, 0, 0], false)));
+
+    const varbinary = TypeInfo(TdsType.bigVarbinary, ValueFormat.ushortLength, 8);
+    immutable(ubyte)[] fixed = readValue!(immutable(ubyte)[])(Value(varbinary, [1, 2], false));
+    ubyte[] copy = readValue!(ubyte[])(Value(varbinary, [1, 2], false));
+    copy[0] = 3; // a copy of its own
+    assert(fixed == [1, 2] && copy == [3, 2]);
+}
+
+private bool isTextColumn(const Value v) @safe pure nothrow
 {
     import mssql.types.typeinfo : TdsType;
 
@@ -314,7 +340,7 @@ package Parameter[] fieldParameters(T)(const ref T value)
 }
 
 /// `name` as a bracketed T-SQL identifier (`]` doubled).
-package string quoteIdentifier(string name) @safe pure
+package string quoteIdentifier(string name) @safe pure nothrow
 {
     import std.array : replace;
 

@@ -58,7 +58,7 @@ always-available thread mode.
 +/
 enum bool mssqlHasVibe = hasVibeCore;
 
-private string versionString(uint major, uint minor, uint patch) pure @safe
+private string versionString(uint major, uint minor, uint patch) @safe pure nothrow
 {
     import std.conv : to;
 

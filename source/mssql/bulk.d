@@ -146,7 +146,7 @@ final class BulkInserter
     can't be converted to its column's type (the row is not added, the
     inserter stays usable); `ServerException` when a batch ends with an error.
     +/
-    void addRow(Args...)(Args args)
+    void addRow(Args...)(auto ref Args args)
     {
         addParameters(parameters(args));
     }
@@ -158,7 +158,7 @@ final class BulkInserter
     Throws: `ClientException` if the inserter's columns are not the struct's
     mapped fields; as `addRow`.
     +/
-    void add(T)(T value) if (is(T == struct))
+    void add(T)(auto ref T value) if (is(T == struct))
     {
         enum fields = columnNames!T;
         checkColumns(fields);
@@ -354,7 +354,7 @@ private enum ushort columnComputed = 0x0020;
 private enum uint timestampUserType = 80;
 
 /// B_VARCHAR: a count of UTF-16 characters, then the characters.
-private void appendName(ref ubyte[] buffer, string name) @safe
+private void appendName(ref ubyte[] buffer, string name) @safe pure
 {
     import dbwire.charset.utf16 : encodeUtf16le;
 

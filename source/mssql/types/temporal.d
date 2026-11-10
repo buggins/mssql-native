@@ -69,7 +69,7 @@ struct Temporal
     The exact point in time: values without an offset are taken as UTC, a
     `datetimeoffset` gets a time zone with its offset.
     +/
-    @property SysTime sysTime() const @safe
+    @property SysTime sysTime() const @safe pure
     {
         import std.datetime.timezone : SimpleTimeZone, UTC;
 
@@ -210,7 +210,7 @@ Temporal decodeTemporal(const ref TypeInfo t, scope const(ubyte)[] bytes) @safe 
 }
 
 /// Bytes of the time part of `time(n)`, `datetime2(n)` and `datetimeoffset(n)`.
-private size_t timeLength(uint scale) @safe pure nothrow @nogc
+package(mssql) size_t timeLength(uint scale) @safe pure nothrow @nogc
 {
     return scale <= 2 ? 3 : scale <= 4 ? 4 : 5;
 }
@@ -245,7 +245,7 @@ private size_t checked(const ref TypeInfo t, scope const(ubyte)[] bytes, size_t 
     return n;
 }
 
-private ClientException invalid(const ref TypeInfo t) @safe pure
+private ClientException invalid(const ref TypeInfo t) @safe pure nothrow
 {
     return new ClientException("Invalid " ~ t.name ~ " value");
 }

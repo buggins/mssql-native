@@ -394,7 +394,7 @@ Splits an ADO-style connection string and maps its keys (see
 
 Throws: `ClientException` for syntax errors, unknown keys and unsupported values.
 +/
-AdoConnectionString parseAdoString(string connectionString) @safe
+AdoConnectionString parseAdoString(string connectionString) @safe pure
 {
     import std.string : strip, toLower;
 
@@ -570,7 +570,7 @@ AdoConnectionString parseAdoString(string connectionString) @safe
 }
 
 /// The `key=value` pairs of an ADO-style connection string, unquoted.
-private string[2][] splitAdo(string s) @safe
+private string[2][] splitAdo(string s) @safe pure
 {
     import std.string : strip;
 
@@ -673,7 +673,7 @@ private string normalizeKey(string key) @safe pure
 }
 
 /// `host`, `host,port`, `tcp:host,port`; `.`, `(local)` are localhost.
-private HostPort parseServer(string server) @safe
+private HostPort parseServer(string server) @safe pure
 {
     import std.algorithm.searching : findSplit, startsWith;
     import std.conv : ConvException, to;
