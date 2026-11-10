@@ -117,26 +117,24 @@ final class PacketWriter
 
     /++
     Appends `text` as UTF-16LE, exactly as `encodeUtf16le` encodes it
-    (invalid UTF-8 as U+FFFD); ASCII text goes in without allocating (until
-    dbwire has an encoder into a caller's buffer: buggins/dbwire#66).
+    (invalid UTF-8 as U+FFFD), straight into the packets: nothing is
+    allocated. `utf16Length` gives its length.
     +/
     void putUtf16(scope const(char)[] text) @safe
     {
-        import dbwire.charset.utf16 : encodeUtf16le;
+        import dbwire.charset.utf16 : encodeUtf16leInto;
 
-        if (!isAscii(text))
-            return put(encodeUtf16le(text));
-        ubyte[512] chunk;
-        while (text.length)
+        assert(inMessage, "begin() first");
+        size_t pos;
+        while (pos < text.length)
         {
-            const n = text.length < chunk.length / 2 ? text.length : chunk.length / 2;
-            foreach (i; 0 .. n)
+            if (buffer.length - used >= 4)
+                used += encodeUtf16leInto(text, pos, buffer[used .. $]); // whole characters, at least one
+            else
             {
-                chunk[2 * i] = cast(ubyte) text[i];
-                chunk[2 * i + 1] = 0;
+                ubyte[4] piece; // the end of the packet: a character may go on in the next one
+                put(piece[0 .. encodeUtf16leInto(text, pos, piece[])]);
             }
-            put(chunk[0 .. 2 * n]);
-            text = text[n .. $];
         }
     }
 
@@ -187,15 +185,6 @@ final class PacketWriter
         firstStatus = PacketStatus.normal; // status bits such as reset go into the first packet only
         used = packetHeaderSize;
     }
-}
-
-/// Whether `text` is all ASCII (so its UTF-16 form is two bytes per `char`).
-bool isAscii(scope const(char)[] text) @safe pure nothrow @nogc
-{
-    foreach (c; text)
-        if (c >= 0x80)
-            return false;
-    return true;
 }
 
 /++
@@ -370,7 +359,11 @@ final class PacketReader : Transport
     import dbwire.charset.utf16 : encodeUtf16le;
     import dbwire.io.mock : MockTransport;
 
-    foreach (text; ["", "SELECT 1", "x".replicate(700), "é😀\xFF ok", "ab".replicate(300) ~ "ж"])
+    foreach (text; [
+        "", "SELECT 1", "x".replicate(700), "é😀\xFF ok", "ab".replicate(300) ~ "ж",
+        "ж".replicate(300), "😀".replicate(200), "a" ~ "😀".replicate(200),
+        "ab" ~ "😀".replicate(200)
+    ])
     {
         auto t = new MockTransport;
         auto w = new PacketWriter(t, 512);
@@ -386,5 +379,4 @@ final class PacketReader : Transport
         }
         assert(payload == encodeUtf16le(text));
     }
-    assert(isAscii("SELECT ?") && !isAscii("é") && isAscii(""));
 }

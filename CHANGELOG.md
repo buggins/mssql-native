@@ -123,6 +123,13 @@ From the code review (#40):
   oracle-native: the fixes from its code review (huge TZif counts rejected
   before allocating, the next address tried when a socket can't be created,
   faster character set conversions, fewer allocations).
+- dbwire `~>0.9.3` (#48): SQL text, procedure and parameter names and text
+  parameters are encoded as UTF-16 straight into the packets, without
+  allocating, also when they aren't ASCII (dbwire's `encodeUtf16leInto`
+  replaces the ASCII-only workaround); faster decoding of ASCII text; float
+  text laid out by dbwire's `formatDigits` and date/time text built with its
+  `TextBuffer` (the same text); a `?password=` in a connection string is
+  masked in error messages.
 - `connect_timeout=0` (`Connect Timeout=0`, `ConnectionOptions.connectTimeout
   = Duration.zero`) means no time limit, as in ADO.NET. With dbwire 0.8
   connecting failed at once.

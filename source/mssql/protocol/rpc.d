@@ -7,7 +7,7 @@ License:   $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0).
 +/
 module mssql.protocol.rpc;
 
-import dbwire.charset.utf16 : decodeUtf16le, encodeUtf16le;
+import dbwire.charset.utf16 : decodeUtf16le, utf16Length;
 import dbwire.io.buffer : BufferedReader;
 import mssql.exception : ClientException, ProtocolException;
 import mssql.params : Parameter;
@@ -52,9 +52,8 @@ void putProcedure(PacketWriter w, string name, ushort id) @safe
 {
     if (name.length)
     {
-        const n = encodeUtf16le(name);
-        w.putLE!ushort(cast(ushort)(n.length / 2));
-        w.put(n);
+        w.putLE!ushort(cast(ushort)(utf16Length(name) / 2));
+        w.putUtf16(name);
     }
     else
     {
@@ -123,9 +122,8 @@ void putParameter(PacketWriter w, const ref Parameter p, Collation collation, si
     }
     else
     {
-        const n = encodeUtf16le(p.name);
-        w.putByte(cast(ubyte)(n.length / 2));
-        w.put(n);
+        w.putByte(cast(ubyte)(utf16Length(p.name) / 2));
+        w.putUtf16(p.name);
     }
     w.putByte(p.isOutput ? ParamStatus.byRefValue : 0);
     putTypeInfo(w, p.type, collation);
@@ -137,27 +135,18 @@ void putParameter(PacketWriter w, const ref Parameter p, Collation collation, si
 /++
 Writes an unnamed `nvarchar` parameter holding `text`, with the same bytes as
 `putParameter` of `Parameter.of(text)`: `nvarchar(4000)` up to 8000 bytes of
-UTF-16, else `nvarchar(max)`. ASCII text is written without allocating.
+UTF-16, else `nvarchar(max)`. Nothing is allocated.
 +/
 void putTextParameter(PacketWriter w, scope const(char)[] text, Collation collation) @safe
 {
-    import mssql.protocol.packet : isAscii;
-
-    const ascii = isAscii(text);
-    const utf16 = ascii ? null : encodeUtf16le(text);
-    const length = ascii ? 2 * text.length : utf16.length;
+    const length = utf16Length(text);
     const max = length > 8000; // as Parameter.of chooses
     const type = TypeInfo(TdsType.nvarchar, max ? ValueFormat.plp : ValueFormat.ushortLength, max ? 0xFFFF : 8000);
     w.putByte(0); // no name
     w.putByte(0); // status
     putTypeInfo(w, type, collation);
     if (putValueStart(w, type.format, false, length))
-    {
-        if (ascii)
-            w.putUtf16(text);
-        else
-            w.put(utf16);
-    }
+        w.putUtf16(text);
     putValueEnd(w, type.format, false);
 }
 
@@ -275,6 +264,7 @@ OutputParameter readReturnValue(BufferedReader r, size_t maxLength) @safe
 
 @safe unittest
 {
+    import dbwire.charset.utf16 : encodeUtf16le;
     import dbwire.io.mock : MockTransport;
     import mssql.params : numbered, parameters;
     import mssql.protocol.packet : PacketType;
