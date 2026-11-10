@@ -16,10 +16,12 @@ License:   $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0).
 +/
 module mssql.types.encode;
 
+import std.conv : to;
+import dbwire.io.buffer : toLittleEndian;
 import dbwire.types.decimal : Decimal, RoundingMode;
 import mssql.exception : ClientException;
-import mssql.params : Parameter;
-import mssql.types.temporal : Temporal, TemporalKind, decodeTemporal;
+import mssql.params : Parameter, le = littleEndian;
+import mssql.types.temporal : Temporal, TemporalKind, decodeTemporal, timeLength;
 import mssql.types.typeinfo : TdsType, TypeInfo, ValueFormat, rowversionUserType;
 import mssql.types.values : decimalValue, floatValue, integerValue, isDecimal, isFloat, isInteger;
 
@@ -202,14 +204,14 @@ void appendTypeInfo(ref ubyte[] buffer, const ref TypeInfo t) @safe pure
     case TdsType.bigChar:
     case TdsType.nvarchar:
     case TdsType.nchar:
-        appendLE(buffer, t.maxLength, 2);
+        buffer ~= toLittleEndian(cast(ushort) t.maxLength);
         const c = t.collation;
-        appendLE(buffer, c.lcid | (cast(uint) c.flags << 20) | (cast(uint) c.version_ << 28), 4);
+        buffer ~= toLittleEndian(c.lcid | (cast(uint) c.flags << 20) | (cast(uint) c.version_ << 28));
         buffer ~= c.sortId;
         break;
     case TdsType.bigVarbinary:
     case TdsType.bigBinary:
-        appendLE(buffer, t.maxLength, 2);
+        buffer ~= toLittleEndian(cast(ushort) t.maxLength);
         break;
     case TdsType.xml:
         buffer ~= 0; // no schema
@@ -243,7 +245,7 @@ void appendValue(ref ubyte[] buffer, const ref TypeInfo t, const ref Parameter p
             buffer ~= [0xFF, 0xFF];
             return;
         case ValueFormat.plp:
-            appendLE(buffer, ulong.max, 8);
+            buffer ~= toLittleEndian(ulong.max);
             return;
         case ValueFormat.textPointer:
         case ValueFormat.longLength:
@@ -262,18 +264,18 @@ void appendValue(ref ubyte[] buffer, const ref TypeInfo t, const ref Parameter p
         buffer ~= data;
         return;
     case ValueFormat.ushortLength:
-        appendLE(buffer, data.length, 2);
+        buffer ~= toLittleEndian(cast(ushort) data.length);
         buffer ~= data;
         return;
     case ValueFormat.plp:
         // "unknown length": SQL Server's bulk load refuses PLP values sent with their total length (error 4804)
-        appendLE(buffer, 0xFFFF_FFFF_FFFF_FFFE, 8);
+        buffer ~= toLittleEndian(0xFFFF_FFFF_FFFF_FFFEUL);
         if (data.length)
         {
-            appendLE(buffer, data.length, 4); // one chunk
+            buffer ~= toLittleEndian(cast(uint) data.length); // one chunk
             buffer ~= data;
         }
-        appendLE(buffer, 0, 4); // terminator
+        buffer ~= toLittleEndian(0u); // terminator
         return;
     case ValueFormat.textPointer:
     case ValueFormat.longLength:
@@ -322,7 +324,7 @@ private const(ubyte)[] convert(const ref TypeInfo t, const ref Parameter p, stri
         const bool fits = n == 1 ? v >= 0 && v <= 255 : n == 2 ? v >= short.min && v <= short.max : n == 4 ? v >= int
             .min && v <= int.max : true;
         if (!fits)
-            throw outOfRange(toText(v));
+            throw outOfRange(v.to!string);
         return le(v, n);
     case TdsType.floatN:
         double v;
@@ -337,7 +339,7 @@ private const(ubyte)[] convert(const ref TypeInfo t, const ref Parameter p, stri
 
             const f = cast(float) v;
             if (!isFinite(f))
-                throw outOfRange(toText(v));
+                throw outOfRange(v.to!string);
             return nativeToLittleEndian(f).dup;
         }
         import std.bitmanip : nativeToLittleEndian;
@@ -370,8 +372,8 @@ private const(ubyte)[] convert(const ref TypeInfo t, const ref Parameter p, stri
         if (source.type != TdsType.nvarchar)
             throw mismatch();
         if (t.maxLength != 0xFFFF && t.type != TdsType.xml && p.data.length > t.maxLength)
-            throw new ClientException("A text of " ~ toText(
-                    p.data.length / 2) ~ " characters is too long for column '"
+            throw new ClientException("A text of " ~ (p.data.length / 2)
+                    .to!string ~ " characters is too long for column '"
                     ~ column ~ "' (" ~ declaration(t) ~ ")");
         return p.data;
     case TdsType.bigVarchar:
@@ -380,8 +382,7 @@ private const(ubyte)[] convert(const ref TypeInfo t, const ref Parameter p, stri
             throw mismatch();
         const bytes = eightBit(t, p.data, column);
         if (t.maxLength != 0xFFFF && bytes.length > t.maxLength)
-            throw new ClientException("A text of " ~ toText(
-                    bytes.length) ~ " bytes is too long for column '"
+            throw new ClientException("A text of " ~ bytes.length.to!string ~ " bytes is too long for column '"
                     ~ column ~ "' (" ~ declaration(t) ~ ")");
         return bytes;
     case TdsType.bigVarbinary:
@@ -389,8 +390,8 @@ private const(ubyte)[] convert(const ref TypeInfo t, const ref Parameter p, stri
         if (source.type != TdsType.bigVarbinary)
             throw mismatch();
         if (t.maxLength != 0xFFFF && p.data.length > t.maxLength)
-            throw new ClientException(toText(
-                    p.data.length) ~ " bytes are too long for column '" ~ column ~ "' ("
+            throw new ClientException(
+                    p.data.length.to!string ~ " bytes are too long for column '" ~ column ~ "' ("
                     ~ declaration(t) ~ ")");
         return p.data;
     case TdsType.guid:
@@ -412,7 +413,7 @@ private const(ubyte)[] convert(const ref TypeInfo t, const ref Parameter p, stri
 }
 
 /// `char`/`varchar` bytes of UTF-16LE `utf16` in the code page of column type `t`.
-private immutable(ubyte)[] eightBit(const ref TypeInfo t, scope const(ubyte)[] utf16, string column) @safe
+private immutable(ubyte)[] eightBit(const ref TypeInfo t, scope const(ubyte)[] utf16, string column) @safe pure
 {
     import dbwire.charset.codepage : CodePage;
     import dbwire.charset.utf16 : decodeUtf16le;
@@ -426,13 +427,13 @@ private immutable(ubyte)[] eightBit(const ref TypeInfo t, scope const(ubyte)[] u
     if (number <= 0 || !CodePage.find(number, page))
         throw new ClientException("Column '" ~ column ~ "': the code page of its collation is not supported");
     try
-        return (() @trusted => cast(immutable(ubyte)[]) page.encode(text))(); // unique: built by encode
+        return page.encode(text); // a pure function's new array converts to immutable
     catch (ClientException e)
         throw new ClientException("Column '" ~ column ~ "': " ~ e.msg);
 }
 
 /// A decimal of precision `precision`: sign, then 4, 8, 12 or 16 bytes of magnitude.
-private immutable(ubyte)[] decimalBytes(const Decimal d, uint precision, lazy ClientException tooLarge) @safe
+private immutable(ubyte)[] decimalBytes(const Decimal d, uint precision, lazy ClientException tooLarge) @safe pure
 {
     import std.bigint : BigInt;
 
@@ -443,14 +444,11 @@ private immutable(ubyte)[] decimalBytes(const Decimal d, uint precision, lazy Cl
     if (u >= BigInt(10) ^^ precision)
         throw tooLarge;
     const size = precision <= 9 ? 4 : precision <= 19 ? 8 : precision <= 28 ? 12 : 16;
-    auto b = new ubyte[1 + size];
+    ubyte[17] b;
     b[0] = negative ? 0 : 1;
-    foreach (i; 0 .. size)
-    {
-        b[1 + i] = cast(ubyte)(u % BigInt(256)).toLong();
-        u >>= 8;
-    }
-    return (() @trusted => cast(immutable(ubyte)[]) b)(); // unique: built here
+    b[1 .. 9] = toLittleEndian(u.getDigit!ulong(0));
+    b[9 .. 17] = toLittleEndian(u.ulongLength > 1 ? u.getDigit!ulong(1) : 0); // below 10^38 < 2^128
+    return b[0 .. 1 + size].idup;
 }
 
 /// A decimal's sign and magnitude, when the magnitude fits in 64 bits (`ok`).
@@ -531,11 +529,10 @@ private immutable(ubyte)[] smallDecimalBytes(bool negative, ulong magnitude, uin
     if (precision < 20 && magnitude >= powersOf10[precision])
         throw tooLarge;
     const size = precision <= 9 ? 4 : precision <= 19 ? 8 : precision <= 28 ? 12 : 16;
-    auto b = new ubyte[1 + size];
+    ubyte[17] b;
     b[0] = negative ? 0 : 1;
-    foreach (i; 0 .. 8 < size ? 8 : size)
-        b[1 + i] = cast(ubyte)(magnitude >> (8 * i));
-    return (() @trusted => cast(immutable(ubyte)[]) b)(); // unique: built here
+    b[1 .. 9] = toLittleEndian(magnitude);
+    return b[0 .. 1 + size].idup;
 }
 
 /// money or smallmoney from a sign and magnitude at scale 4.
@@ -550,7 +547,7 @@ private immutable(ubyte)[] smallMoneyBytes(bool negative, ulong magnitude, uint 
 }
 
 /// money (8 bytes: high half, then low half) or smallmoney (4 bytes) of `d` at scale 4.
-private immutable(ubyte)[] moneyBytes(const Decimal d, uint size, lazy ClientException tooLarge) @safe
+private immutable(ubyte)[] moneyBytes(const Decimal d, uint size, lazy ClientException tooLarge) @safe pure
 {
     import std.bigint : BigInt;
 
@@ -664,32 +661,6 @@ private long unitOf(uint scale) @safe pure nothrow @nogc
     foreach (_; scale .. 7)
         unit *= 10;
     return unit;
-}
-
-private size_t timeLength(uint scale) @safe pure nothrow @nogc
-{
-    return scale <= 2 ? 3 : scale <= 4 ? 4 : 5;
-}
-
-private immutable(ubyte)[] le(long value, size_t n) @safe pure nothrow
-{
-    auto b = new ubyte[n];
-    foreach (i; 0 .. n)
-        b[i] = cast(ubyte)(value >> (8 * i));
-    return (() @trusted => cast(immutable(ubyte)[]) b)(); // unique: built here
-}
-
-private void appendLE(ref ubyte[] buffer, ulong value, size_t n) @safe pure nothrow
-{
-    foreach (i; 0 .. n)
-        buffer ~= cast(ubyte)(value >> (8 * i));
-}
-
-private string toText(T)(T value) @safe pure
-{
-    import std.conv : to;
-
-    return value.to!string;
 }
 
 ///

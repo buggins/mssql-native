@@ -6,6 +6,7 @@ License:   $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0).
 +/
 module mssql.result;
 
+import std.conv : to;
 import mssql.connection : Connection;
 import mssql.exception : ClientException;
 import mssql.protocol.tokens : Done, TokenType;
@@ -106,7 +107,7 @@ final class QueryResult
 
     Throws: `ClientException` if there is no such column.
     +/
-    size_t columnIndex(string name) const @safe
+    size_t columnIndex(string name) const @safe pure
     {
         import std.uni : icmp;
 
@@ -166,14 +167,14 @@ final class QueryResult
 
     Throws: `ClientException` if there is no current row or no such column.
     +/
-    Value opIndex(size_t column) @safe
+    Value opIndex(size_t column) @safe pure
     {
         const v = valueRef(column);
         return Value(columnList[column].type, v.isNull ? null : bytes(v), v.isNull);
     }
 
     /// Whether the value in `column` is NULL.
-    bool isNull(size_t column) @safe
+    bool isNull(size_t column) @safe pure
     {
         return valueRef(column).isNull;
     }
@@ -215,37 +216,37 @@ final class QueryResult
     }
 
     /// The value in `column`, see `Value.getBytes`: the raw bytes (a copy).
-    ubyte[] getBytes(size_t column) @safe
+    ubyte[] getBytes(size_t column) @safe pure
     {
         return this[column].getBytes();
     }
 
     /// The value in `column`, see `Value.getDate`.
-    Date getDate(size_t column) @safe
+    Date getDate(size_t column) @safe pure
     {
         return this[column].getDate();
     }
 
     /// The value in `column`, see `Value.getTime`.
-    TimeOfDay getTime(size_t column) @safe
+    TimeOfDay getTime(size_t column) @safe pure
     {
         return this[column].getTime();
     }
 
     /// The value in `column`, see `Value.getDuration`: time of day, exact.
-    Duration getDuration(size_t column) @safe
+    Duration getDuration(size_t column) @safe pure
     {
         return this[column].getDuration();
     }
 
     /// The value in `column`, see `Value.getDateTime`.
-    DateTime getDateTime(size_t column) @safe
+    DateTime getDateTime(size_t column) @safe pure
     {
         return this[column].getDateTime();
     }
 
     /// The value in `column`, see `Value.getSysTime`: exact; UTC for types without an offset.
-    SysTime getSysTime(size_t column) @safe
+    SysTime getSysTime(size_t column) @safe pure
     {
         return this[column].getSysTime();
     }
@@ -268,7 +269,7 @@ final class QueryResult
 
     Throws: `ClientException` until the whole response is read (all rows, or `close`).
     +/
-    @property const(OutputParameter)[] outputs() const @safe
+    @property const(OutputParameter)[] outputs() const @safe pure
     {
         checkFinished();
         return outputList;
@@ -280,7 +281,7 @@ final class QueryResult
 
     Throws: `ClientException` until the whole response is read (all rows, or `close`).
     +/
-    @property Nullable!int returnStatus() const @safe
+    @property Nullable!int returnStatus() const @safe pure
     {
         checkFinished();
         return hasStatus ? Nullable!int(statusValue) : Nullable!int.init;
@@ -405,21 +406,20 @@ final class QueryResult
         }
     }
 
-    private void checkFinished() const @safe
+    private void checkFinished() const @safe pure
     {
         if (!finished)
             throw new ClientException(
                     "Output parameters and the return status are available after all rows are read or close()");
     }
 
-    private ValueRef valueRef(size_t column) @safe
+    private ValueRef valueRef(size_t column) @safe pure
     {
         if (!rowReady)
             throw new ClientException("No current row");
         if (column >= values.length)
             throw new ClientException(
-                    "Column index " ~ toText(column) ~ " out of range (" ~ toText(
-                    values.length) ~ " columns)");
+                    "Column index " ~ column.to!string ~ " out of range (" ~ values.length.to!string ~ " columns)");
         return values[column];
     }
 
@@ -509,11 +509,4 @@ final class QueryResult
             break;
         }
     }
-}
-
-private string toText(T)(T value) @safe pure
-{
-    import std.conv : to;
-
-    return value.to!string;
 }

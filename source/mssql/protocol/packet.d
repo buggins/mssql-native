@@ -9,9 +9,10 @@ License:   $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0).
 +/
 module mssql.protocol.packet;
 
+import std.conv : to;
 import core.time : Duration;
 
-import dbwire.io.buffer : isFixedWireType, toLittleEndian;
+import dbwire.io.buffer : fromBigEndian, isFixedWireType, toBigEndian, toLittleEndian;
 import dbwire.io.transport : Transport;
 import mssql.exception : ConnectionException, ProtocolException;
 
@@ -83,7 +84,7 @@ final class PacketWriter
     }
 
     /// Starts a message of `messageType`; `status` bits such as `resetConnection` go into its first packet.
-    void begin(PacketType messageType, ubyte status = PacketStatus.normal) @safe pure nothrow
+    void begin(PacketType messageType, ubyte status = PacketStatus.normal) @safe pure nothrow @nogc
     {
         assert(!inMessage, "a message is already being written");
         type = messageType;
@@ -153,8 +154,7 @@ final class PacketWriter
     {
         buffer[0] = type;
         buffer[1] = cast(ubyte)((last ? PacketStatus.endOfMessage : PacketStatus.normal) | firstStatus);
-        buffer[2] = cast(ubyte)(used >> 8);
-        buffer[3] = cast(ubyte) used;
+        buffer[2 .. 4] = toBigEndian(cast(ushort) used);
         buffer[4] = buffer[5] = 0; // SPID: a client may send 0
         buffer[6] = packetId++; // ignored by the server, incremented modulo 256
         buffer[7] = 0; // window: unused
@@ -256,9 +256,9 @@ final class PacketReader : Transport
                 throw new ConnectionException("Connection closed by the server");
             got += n;
         }
-        const length = (header[2] << 8) | header[3];
+        const length = fromBigEndian!ushort(header[2 .. 4]);
         if (length < packetHeaderSize)
-            throw new ProtocolException("Invalid TDS packet length " ~ toText(length));
+            throw new ProtocolException("Invalid TDS packet length " ~ length.to!string);
         if (started && header[0] != currentType)
             throw new ProtocolException("TDS packet type changed inside a message");
         currentType = header[0];
@@ -266,13 +266,6 @@ final class PacketReader : Transport
         remaining = length - packetHeaderSize;
         started = true;
     }
-}
-
-private string toText(T)(T value) @safe pure
-{
-    import std.conv : to;
-
-    return value.to!string;
 }
 
 ///

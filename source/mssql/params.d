@@ -43,6 +43,7 @@ import std.traits : isFloatingPoint, isIntegral, isSomeChar, isSomeString, Unqua
 import std.typecons : Nullable;
 import std.uuid : UUID;
 import std.variant : Variant;
+import dbwire.io.buffer : toLittleEndian;
 import dbwire.types.decimal : Decimal;
 import mssql.exception : ClientException;
 import mssql.types.typeinfo : TdsType, TypeInfo, ValueFormat;
@@ -65,13 +66,14 @@ struct Parameter
 
     /++
     The parameter for `value` (see the module documentation for the types).
-    Attributes are inferred: `@safe` except for `Variant`, whose copies are `@system`.
+    Attributes are inferred; `value` is taken by reference when it can be, so
+    `@safe` code can pass a `Variant` (whose copies are `@system`).
 
     Throws: `ClientException` for values SQL Server can't hold (NaN and
     infinity, a `Decimal` with more than 38 digits or a scale above 38, a
     `Duration` outside 0 to 24 hours, a date before year 1).
     +/
-    static Parameter of(T)(T value)
+    static Parameter of(T)(auto ref T value)
     {
         alias U = Unqual!T;
         static if (is(U == Parameter))
@@ -87,7 +89,7 @@ struct Parameter
     }
 
     /// A NULL of the SQL Server type for D type `T`.
-    static Parameter nullOf(T)() @safe
+    static Parameter nullOf(T)()
     {
         auto p = typeOf!(Unqual!T)();
         p.isNull = true;
@@ -99,7 +101,7 @@ struct Parameter
     (procedures may read it); its value after the call is in the result's
     `outputs`.
     +/
-    static Parameter output(T)(T initial)
+    static Parameter output(T)(auto ref T initial)
     {
         auto p = of(initial);
         p.isOutput = true;
@@ -107,7 +109,7 @@ struct Parameter
     }
 
     /// An output parameter of the SQL Server type for D type `T`, initially NULL.
-    static Parameter outputOf(T)() @safe
+    static Parameter outputOf(T)()
     {
         auto p = nullOf!T();
         p.isOutput = true;
@@ -115,7 +117,7 @@ struct Parameter
     }
 
     /// This parameter with the name `name` (`@` is added if missing): for named procedure parameters.
-    Parameter named(string name) const @safe
+    Parameter named(string name) const @safe pure nothrow
     {
         Parameter p = this;
         p.name = name.length && name[0] != '@' ? "@" ~ name : name;
@@ -147,7 +149,7 @@ private Parameter typed(TdsType t, ValueFormat format, uint maxLength, string de
 }
 
 /// The type of parameters of D type `T` (sizes for typical values).
-private Parameter typeOf(T)() @safe
+private Parameter typeOf(T)()
 {
     static if (is(T == bool))
         return typed(TdsType.bitN, ValueFormat.byteLength, 1, "bit");
@@ -196,7 +198,7 @@ private Parameter decimalType(int scale) @safe pure
 }
 
 /// The parameter for a value of a supported D type.
-private Parameter make(T)(T value) @safe
+private Parameter make(T)(T value)
 {
     alias U = Unqual!T;
     auto p = typeOf!U();
@@ -231,10 +233,10 @@ private Parameter make(T)(T value) @safe
             const text = [value].to!string;
         else
             const text = value.to!string;
-        auto bytes = encodeUtf16le(text);
+        immutable(ubyte)[] bytes = encodeUtf16le(text); // a pure function's new array converts to immutable
         if (bytes.length > 8000)
             p = typed(TdsType.nvarchar, ValueFormat.plp, 0xFFFF, "nvarchar(max)");
-        p.data = (() @trusted => cast(immutable(ubyte)[]) bytes)(); // unique: built here
+        p.data = bytes;
     }
     else static if (is(U : const(ubyte)[]))
     {
@@ -299,11 +301,10 @@ private Parameter decimalParameter(const Decimal value) @safe
     {
         const v = cast(long) w[0];
         const magnitude = v < 0 ? -cast(ulong) v : cast(ulong) v;
-        ubyte[] small = new ubyte[17];
+        ubyte[17] small;
         small[0] = v < 0 ? 0 : 1;
-        foreach (i; 0 .. 8)
-            small[1 + i] = cast(ubyte)(magnitude >> (8 * i));
-        p.data = (() @trusted => cast(immutable(ubyte)[]) small)(); // unique: built here
+        small[1 .. 9] = toLittleEndian(magnitude);
+        p.data = small.idup;
         return p;
     }
     BigInt u = d.unscaled.toBigInt();
@@ -312,32 +313,48 @@ private Parameter decimalParameter(const Decimal value) @safe
         u = -u;
     if (u >= BigInt(10) ^^ 38)
         throw new ClientException("Decimal parameter " ~ value.toString() ~ ": more than 38 digits");
-    ubyte[] data = new ubyte[17];
+    ubyte[17] data;
     data[0] = negative ? 0 : 1;
-    foreach (i; 0 .. 16)
-    {
-        data[1 + i] = cast(ubyte)(u % BigInt(256)).toLong();
-        u >>= 8;
-    }
-    p.data = (() @trusted => cast(immutable(ubyte)[]) data)(); // unique: built here
+    data[1 .. 9] = toLittleEndian(u.getDigit!ulong(0));
+    data[9 .. 17] = toLittleEndian(u.ulongLength > 1 ? u.getDigit!ulong(1) : 0); // below 10^38 < 2^128
+    p.data = data.idup;
     return p;
 }
 
-private Parameter ofVariant(Variant value) @trusted // Variant.get is @system
+private bool sameType(const object.TypeInfo a, const object.TypeInfo b) @trusted
+{
+    return a == b; // TypeInfo.opEquals is not annotated @safe; it compares the type names
+}
+
+private Parameter ofVariant(ref const Variant value) @safe
 {
     import std.meta : AliasSeq;
 
+    alias Types = AliasSeq!(bool, byte, ubyte, short, ushort, int, uint, long, ulong, float, double, real, char,
+            wchar, dchar, string, wstring, dstring, char[], ubyte[], immutable(ubyte)[], const(ubyte)[], Decimal,
+            Date, TimeOfDay, Duration, DateTime, SysTime, UUID);
+
     if (!value.hasValue)
         return Parameter.nullOf!string();
-    static foreach (T; AliasSeq!(bool, byte, ubyte, short, ushort, int, uint, long, ulong, float,
-            double, real, char, wchar, dchar, string, wstring, dstring, char[], ubyte[],
-            immutable(ubyte)[], const(ubyte)[], Decimal, Date, TimeOfDay, Duration, DateTime,
-            SysTime, UUID))
+    const type = value.type;
+    // the same TypeInfo object (a pointer comparison); then equal ones, which other shared libraries may have
+    size_t index = Types.length;
+    static foreach (i, T; Types)
+        if (index == Types.length && type is typeid(T))
+            index = i;
+    static foreach (i, T; Types)
+        if (index == Types.length && sameType(type, typeid(T)))
+            index = i;
+    switch (index)
     {
-        if (value.type == typeid(T))
-            return Parameter.of(value.get!T);
+        static foreach (i, T; Types)
+        {
+    case i:
+            return Parameter.of((() @trusted => value.get!T)()); // Variant.get is @system; the type was checked
+        }
+    default:
+        throw new ClientException("Parameters of type " ~ type.toString() ~ " are not supported");
     }
-    throw new ClientException("Parameters of type " ~ value.type.toString() ~ " are not supported");
 }
 
 /// Days since 0001-01-01, in 3 bytes.
@@ -349,16 +366,15 @@ private immutable(ubyte)[] days(const Date date) @safe pure
     return littleEndian(day, 3);
 }
 
-/// `value` as `n` little-endian bytes.
-private immutable(ubyte)[] littleEndian(long value, size_t n) @safe pure nothrow
+/// `value` as `n` (at most 8) little-endian bytes.
+package(mssql) immutable(ubyte)[] littleEndian(long value, size_t n) @safe pure nothrow
+in (n <= 8)
 {
-    auto b = new ubyte[n];
-    foreach (i; 0 .. n)
-        b[i] = cast(ubyte)(value >> (8 * i));
-    return (() @trusted => cast(immutable(ubyte)[]) b)(); // unique: built here
+    const ubyte[8] b = toLittleEndian(value);
+    return b[0 .. n].idup;
 }
 
-private immutable(ubyte)[] ieee(T)(T value) @safe pure nothrow
+private immutable(ubyte)[] ieee(T)(T value)
 {
     import std.bitmanip : nativeToLittleEndian;
 
@@ -374,6 +390,7 @@ private auto bigUnsigned(ulong value) @safe
 
 @safe unittest
 {
+    import std.array : replicate;
     import std.exception : assertThrown;
     import core.time : hours, hnsecs;
     import dbwire.types.wideint : Int256;
@@ -416,14 +433,6 @@ private auto bigUnsigned(ulong value) @safe
     const tz = new immutable SimpleTimeZone(minutes(-330));
     const t = SysTime(DateTime(2024, 1, 31, 12, 34, 56), hnsecs(1_234_567), tz);
     assert(Parameter.of(t).data == [0x87, 0x2A, 0x50, 0x90, 0x97, 0x63, 0x46, 0x0B, 0xB6, 0xFE]);
-}
-
-private string replicate(string s, size_t n) @safe pure
-{
-    string r;
-    foreach (_; 0 .. n)
-        r ~= s;
-    return r;
 }
 
 /++
@@ -557,7 +566,7 @@ package Parameter withDecimalScale(const Parameter p, ubyte scale) @safe
 The parameters for `args`, each converted with `Parameter.of`; a single
 `Parameter[]` argument is taken as the parameters themselves.
 +/
-const(Parameter)[] parameters(Args...)(Args args)
+const(Parameter)[] parameters(Args...)(auto ref Args args)
 {
     static if (Args.length == 1 && is(Args[0] : const(Parameter)[]) && !is(Args[0] == typeof(null)))
         return args[0];
@@ -565,16 +574,16 @@ const(Parameter)[] parameters(Args...)(Args args)
         return convertAll(args);
 }
 
-private Parameter[] convertAll(Args...)(Args args)
+private Parameter[] convertAll(Args...)(auto ref Args args)
 {
     auto result = new Parameter[Args.length];
-    foreach (i, arg; args)
+    foreach (i, ref arg; args)
         result[i] = Parameter.of(arg);
     return result;
 }
 
 /// Copies of `params` named `@p1`, `@p2`, ... (the names of rewritten placeholders).
-Parameter[] numbered(const Parameter[] params) @safe
+Parameter[] numbered(const Parameter[] params) @safe pure nothrow
 {
     import std.conv : to;
 
@@ -588,7 +597,7 @@ Parameter[] numbered(const Parameter[] params) @safe
 }
 
 /// The `@params` declaration of `sp_executesql`: `@p1 int, @p2 nvarchar(4000) OUTPUT`.
-string declarations(const Parameter[] params) @safe pure
+string declarations(const Parameter[] params) @safe pure nothrow
 {
     string s;
     foreach (i, ref p; params)

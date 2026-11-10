@@ -8,8 +8,10 @@ License:   $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0).
 +/
 module mssql.protocol.prelogin;
 
+import std.conv : to;
 import core.time : Duration;
 
+import dbwire.io.buffer : fromBigEndian;
 import dbwire.io.transport : Transport;
 import mssql.exception : ConnectionException, ProtocolException;
 import mssql.protocol.packet : PacketReader, PacketType, PacketWriter;
@@ -108,7 +110,7 @@ Parses the server's PRELOGIN response.
 Throws: `ProtocolException` if the option table is malformed or VERSION or
 ENCRYPTION is missing.
 +/
-PreloginResponse parsePrelogin(scope const(ubyte)[] data) @safe
+PreloginResponse parsePrelogin(scope const(ubyte)[] data) @safe pure
 {
     ProtocolException error(string what)
     {
@@ -127,8 +129,8 @@ PreloginResponse parsePrelogin(scope const(ubyte)[] data) @safe
             break;
         if (pos + 5 > data.length)
             throw error("truncated option table");
-        const offset = (data[pos + 1] << 8) | data[pos + 2];
-        const length = (data[pos + 3] << 8) | data[pos + 4];
+        const offset = fromBigEndian!ushort(data[pos + 1 .. $][0 .. 2]);
+        const length = fromBigEndian!ushort(data[pos + 3 .. $][0 .. 2]);
         if (offset + length > data.length)
             throw error("option data out of range");
         const value = data[offset .. offset + length];
@@ -139,7 +141,7 @@ PreloginResponse parsePrelogin(scope const(ubyte)[] data) @safe
                 throw error("short VERSION");
             response.majorVersion = value[0];
             response.minorVersion = value[1];
-            response.build = cast(ushort)((value[2] << 8) | value[3]);
+            response.build = fromBigEndian!ushort(value[2 .. 4]);
             haveVersion = true;
             break;
         case PreloginOption.encryption:
@@ -183,7 +185,7 @@ EncryptionMode agreeEncryption(Encryption client, ubyte server) @safe pure
         return EncryptionMode.loginOnly;
     if (server == Encryption.notSupported)
         return EncryptionMode.none;
-    throw new ConnectionException("Unknown encryption value from the server: " ~ toText(server));
+    throw new ConnectionException("Unknown encryption value from the server: " ~ server.to!string);
 }
 
 /++
@@ -237,13 +239,6 @@ final class PreloginTlsFraming : Transport
     {
         raw.setTimeouts(receive, send);
     }
-}
-
-private string toText(T)(T value) @safe pure
-{
-    import std.conv : to;
-
-    return value.to!string;
 }
 
 ///

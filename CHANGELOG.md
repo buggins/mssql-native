@@ -6,6 +6,30 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+### Changed
+
+From the review of attributes and D idioms (#42):
+
+- `@safe` code can pass a `Variant` (e.g. `result.getVariant(0)`) to `exec`,
+  `query`, `queryRow`, `queryValue`, `callProcedure`, prepared statements and
+  `BulkInserter.addRow`: arguments are taken by `auto ref` (a `Variant` copy
+  is `@system`). `insert(table, row)` with one struct is `@safe` too (it
+  sliced a pointer), and so are `query!T`/`queryRow!T`/`queryValue!T` with
+  `immutable(ubyte)[]` fields (a cast made them `@system`).
+- `makeVariant` is no longer public (it is `package(mssql)`, constrained to
+  types without elaborate copies or destructors): a public `@trusted`
+  template that copies a `T` hid `@system` postblits.
+- Fewer `@trusted` blocks (dbwire's endian helpers, values built without
+  "unique" casts, `processId` and the pool constructor `@safe`), more `pure`
+  and `nothrow`, explicit attributes off templates, compile-time checks of
+  what `@safe` code can call. Enum names parsed without `std.conv`; one
+  `to!string` instead of six `toText` copies and other duplicated helpers;
+  BigInt bytes through `getDigit`. CI runs the unit tests with
+  `-preview=dip1000` on the latest compilers.
+- Column metadata with an invalid length for `intN`, `bitN`, `floatN`,
+  `moneyN`, `datetimeN` or `uniqueidentifier` is rejected with a
+  `ProtocolException` (a bulk load could otherwise hit an `Error`).
+
 ### Performance
 
 - `real`/`float` text (`getString`) from dbwire's `shortestDigits` instead of

@@ -36,7 +36,7 @@ struct ServerMessage
     int lineNumber;
 
     /// The message as `sqlcmd` prints it: `Msg 102, Level 15, State 1, Line 1: ...`.
-    string toString() const @safe pure
+    string toString() const @safe pure nothrow
     {
         import std.conv : to;
 
@@ -68,7 +68,7 @@ class ServerException : DbException
         file = source file (filled in automatically).
         line = source line (filled in automatically).
     +/
-    this(ServerMessage[] errors, string file = __FILE__, size_t line = __LINE__) @safe pure
+    this(ServerMessage[] errors, string file = __FILE__, size_t line = __LINE__) @safe pure nothrow
     {
         assert(errors.length > 0);
         string text = errors[0].toString();

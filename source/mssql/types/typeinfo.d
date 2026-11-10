@@ -11,7 +11,8 @@ License:   $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0).
 +/
 module mssql.types.typeinfo;
 
-import dbwire.io.buffer : BufferedReader;
+import std.conv : to;
+import dbwire.io.buffer : BufferedReader, fromLittleEndian;
 import mssql.exception : ProtocolException;
 import dbwire.charset.utf16 : decodeUtf16le;
 
@@ -98,7 +99,7 @@ struct Collation
     /// Parses the 5 bytes of a collation.
     static Collation fromBytes(scope const(ubyte)[] b) @safe pure nothrow @nogc
     {
-        const info = b[0] | (b[1] << 8) | (b[2] << 16) | (cast(uint) b[3] << 24);
+        const info = fromLittleEndian!uint(b[0 .. 4]);
         return Collation(info & 0xFFFFF, cast(ubyte)((info >> 20) & 0xFF), cast(ubyte)(info >> 28), b[4]);
     }
 }
@@ -291,6 +292,15 @@ TypeInfo readTypeInfo(BufferedReader r) @safe
     case TdsType.floatN:
     case TdsType.moneyN:
     case TdsType.datetimeN:
+        t.format = ValueFormat.byteLength;
+        t.maxLength = r.readFixed!ubyte();
+        // the encoders and getters rely on these sizes
+        const n = t.maxLength;
+        const valid = t.type == TdsType.guid ? n == 16 : t.type == TdsType.intN ? n == 1 || n == 2 || n == 4 || n == 8
+            : t.type == TdsType.bitN ? n == 1 : n == 4 || n == 8;
+        if (!valid)
+            throw new ProtocolException("Invalid length " ~ n.to!string ~ " for data type 0x" ~ hexByte(b));
+        break;
     case TdsType.char_:
     case TdsType.varchar:
     case TdsType.binary:
@@ -317,7 +327,7 @@ TypeInfo readTypeInfo(BufferedReader r) @safe
         t.format = ValueFormat.byteLength;
         t.scale = r.readFixed!ubyte();
         if (t.scale > 7)
-            throw new ProtocolException("Invalid time scale " ~ toText(t.scale));
+            throw new ProtocolException("Invalid time scale " ~ t.scale.to!string);
         break;
     case TdsType.bigVarbinary:
     case TdsType.bigBinary:
@@ -493,8 +503,7 @@ private void append(BufferedReader r, ref ubyte[] data, size_t length) @safe
 private ProtocolException tooLong(size_t maxLength) @safe pure
 {
     return new ProtocolException(
-            "A value in the server's response is longer than the limit of " ~ toText(
-            maxLength) ~ " bytes");
+            "A value in the server's response is longer than the limit of " ~ maxLength.to!string ~ " bytes");
 }
 
 private Collation readCollation(BufferedReader r) @safe
@@ -514,17 +523,11 @@ private string readUsVarchar(BufferedReader r) @safe
     return decodeUtf16le(r.readExactBytes(2 * r.readFixed!ushort()));
 }
 
-private string hexByte(ubyte b) @safe pure nothrow
+/// `b` as two upper-case hex digits.
+package(mssql) string hexByte(ubyte b) @safe pure nothrow
 {
     static immutable digits = "0123456789ABCDEF";
     return [digits[b >> 4], digits[b & 15]];
-}
-
-private string toText(T)(T value) @safe pure
-{
-    import std.conv : to;
-
-    return value.to!string;
 }
 
 version (unittest)
@@ -601,4 +604,13 @@ version (unittest)
     t = new MockTransport;
     t.feed([0x99]);
     assertThrown!ProtocolException(readTypeInfo(new BufferedReader(t)));
+    foreach (bad; [[0x26, 3], [0x26, 9], [0x68, 2], [0x6D, 2], [0x6E, 0], [0x6F, 16], [0x24, 8]])
+    {
+        t = new MockTransport;
+        t.feed(cast(ubyte[]) bad);
+        assertThrown!ProtocolException(readTypeInfo(new BufferedReader(t)));
+    }
+    t = new MockTransport;
+    t.feed([0x26, 8]);
+    assert(readTypeInfo(new BufferedReader(t)).maxLength == 8);
 }

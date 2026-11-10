@@ -66,7 +66,7 @@ final class PreparedStatement
     Throws: `ClientException` if the number of arguments is wrong;
     `ServerException` if the statement failed.
     +/
-    ulong exec(Args...)(Args args)
+    ulong exec(Args...)(auto ref Args args)
     {
         return execParams(parameters(args));
     }
@@ -87,7 +87,7 @@ final class PreparedStatement
 
     Throws: as `exec`.
     +/
-    QueryResult query(Args...)(Args args)
+    QueryResult query(Args...)(auto ref Args args)
     {
         return queryParams(parameters(args));
     }
