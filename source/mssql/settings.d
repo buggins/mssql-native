@@ -76,7 +76,12 @@ struct ConnectionOptions
     /// `HostNameInCertificate`), client certificates.
     TlsOptions tls;
 
-    /// Maximum time to establish the TCP connection, the TLS handshake and the login.
+    /++
+    Time limit for each step of connecting: the TCP connection, the TLS
+    handshake, and each wait for the server's answer during the login (not
+    for the whole connect). `Duration.zero` (`connect_timeout=0`, or
+    `Connect Timeout=0` in an ADO.NET connection string): no limit.
+    +/
     Duration connectTimeout = 15.seconds;
     /// Maximum time a single socket write may block; `Duration.zero`: no limit.
     Duration sendTimeout = 300.seconds;
@@ -324,6 +329,7 @@ struct ConnectionOptions
     o = ConnectionOptions.fromDsn("sqlserver://[::1]:14330/?encrypt=false&connect_timeout=2.5&packet_size=8000"
             ~ "&io=phobos&host_selection=random&read_only=1&host_name_in_certificate=db.example&pool_max=3");
     assert(o.hosts == [HostPort("::1", 14_330)] && !o.encrypt && o.connectTimeout == 2500.msecs);
+    assert(ConnectionOptions.fromDsn("sqlserver://h/?connect_timeout=0").connectTimeout == Duration.zero);
     assert(o.packetSize == 8000 && o.ioMode == IoMode.phobos && o.hostSelection == HostSelection.random);
     assert(o.readOnlyIntent && o.tls.serverName == "db.example");
 
