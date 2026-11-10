@@ -416,16 +416,16 @@ The shortest decimal text that reads back as `value` (as a `float` if
 `single`) whatever way the reader rounds ties: dbwire's `shortestDigits`
 with `Ties.avoid`, never a text exactly halfway between two values (SQL
 Server reads the tie `-3.668192745606422e+16` as the lower neighbour, a
-correctly rounded `strtod` as the even one), laid out as `%g` with as many
-significant digits (plain when the decimal exponent X of d.ddd × 10^X is at
-least -4 and below the number of digits, else `d.ddde±XX` with at least two
-exponent digits): `0.1`, `-1.5`, `1e+300`, `1e+02`; `nan`, `-nan`, `inf`,
-`-inf` as `%g` writes them.
+correctly rounded `strtod` as the even one), laid out by `formatDigits` as
+`%g` with as many significant digits (plain when the decimal exponent X of
+d.ddd × 10^X is at least -4 and below the number of digits, else `d.ddde±XX`
+with at least two exponent digits): `0.1`, `-1.5`, `1e+300`, `1e+02`; `nan`,
+`-nan`, `inf`, `-inf` as `%g` writes them.
 +/
 private string shortestText(double value, bool single) @safe pure nothrow
 {
     import std.math : isInfinity, isNaN, signbit;
-    import dbwire.types.floattext : Ties, digits, shortestDigits;
+    import dbwire.types.floattext : Ties, formatDigits, shortestDigits;
 
     if (single)
         value = cast(float) value;
@@ -436,49 +436,7 @@ private string shortestText(double value, bool single) @safe pure nothrow
     if (value == 0)
         return signbit(value) ? "-0" : "0";
     const d = single ? shortestDigits(cast(float) value, Ties.avoid) : shortestDigits(value, Ties.avoid);
-    const significant = d.digits;
-    const exponent = d.pointPos - 1; // value = d.ddd × 10^exponent
-    char[32] text = void; // at most a sign, 17 digits, a point and "e-324", or "-0.000" and 17 digits
-    size_t n;
-    void put(scope const(char)[] part...)
-    {
-        text[n .. n + part.length] = part[];
-        n += part.length;
-    }
-
-    if (signbit(value))
-        put('-');
-    if (exponent < -4 || exponent >= cast(int) significant.length)
-    {
-        put(significant[0]);
-        if (significant.length > 1)
-        {
-            put('.');
-            put(significant[1 .. $]);
-        }
-        const magnitude = exponent < 0 ? -exponent : exponent;
-        put('e', exponent < 0 ? '-' : '+');
-        if (magnitude >= 100)
-            put(cast(char)('0' + magnitude / 100));
-        put(cast(char)('0' + magnitude / 10 % 10), cast(char)('0' + magnitude % 10));
-    }
-    else if (exponent < 0)
-    {
-        put('0', '.');
-        foreach (i; 0 .. -exponent - 1)
-            put('0');
-        put(significant);
-    }
-    else
-    {
-        put(significant[0 .. exponent + 1]);
-        if (exponent + 1 < significant.length)
-        {
-            put('.');
-            put(significant[exponent + 1 .. $]);
-        }
-    }
-    return text[0 .. n].idup;
+    return formatDigits(d, signbit(value) != 0); // the default layout is %g
 }
 
 @safe unittest

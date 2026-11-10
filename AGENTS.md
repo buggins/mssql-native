@@ -7,7 +7,7 @@ Guidance for AI coding agents working on **mssql-native**, a native D client for
 - **What:** a pure-D client for SQL Server over the **TDS protocol, version 7.4** (TCP, port 1433), for SQL Server 2017+ and Azure SQL, with blocking (thread) and vibe.d (fiber) I/O. dub package `mssql-native`, root module `mssql`.
 - **Repo:** `git@github.com:buggins/mssql-native.git`, default branch `main`. Author Vadim Lopatin (GitHub `buggins`). License BSL-1.0.
 - **Status:** 0.2.4 released on 2026-11-07 (M0–M5 in 0.1.0: connect, types, parameters, statements, pool and mapping; 0.2.0: M6 more types, M7 bulk insert; 0.2.1: dbwire 0.5; 0.2.2: dbwire 0.6; 0.2.3: version constants; 0.2.4: dbwire 0.8); roadmap issue #11 lists milestones M0–M9 (one issue each). Published on code.dlang.org as `mssql-native`.
-- **Builds on dbwire** (`../dbwire`, 0.9): `dbwire:types` (exceptions, `Decimal`), `:io` (transports, I/O backends, buffers), `:tls` (OpenSSL loaded at run time), `:client` (DSN, failover, pool core); later `:charset` (code pages) and `:crypto` (NTLM). Anything not protocol-specific is added to dbwire (issue + PR there), not here.
+- **Builds on dbwire** (`../dbwire`, `~>0.9.3`): `dbwire:types` (exceptions, `Decimal`), `:io` (transports, I/O backends, buffers), `:tls` (OpenSSL loaded at run time), `:client` (DSN, failover, pool core); later `:charset` (code pages) and `:crypto` (NTLM). Anything not protocol-specific is added to dbwire (issue + PR there), not here.
 - **Sibling project:** `../clickhoused` (ClickHouse client): the model for structure, API style, tests and conventions (its `AGENTS.md`).
 - **`PLAN.md` (local and optional):** the design plan is a local, untracked file (excluded through `.git/info/exclude`). If present, read it before design-level changes and keep it up to date; never `git add` it.
 
@@ -77,7 +77,8 @@ source/mssql/
   protocol/            packet.d (PacketWriter, PacketReader), prelogin.d (options, encryption agreement,
                        PreloginTlsFraming), login.d (LOGIN7), tokens.d (DONE, ERROR/INFO, LOGINACK, ENVCHANGE),
                        rpc.d (RPC requests, parameters on the wire, RETURNVALUE, OutputParameter);
-                       UTF-16LE comes from dbwire:charset (encodeUtf16le/decodeUtf16le)
+                       UTF-16LE comes from dbwire:charset (decodeUtf16le; PacketWriter.putUtf16 encodes straight
+                       into the packets with encodeUtf16leInto, utf16Length gives the length beforehand)
   types/               typeinfo.d (TYPE_INFO, COLMETADATA, value framing for every type), values.d (conversions,
                        text, Variant), temporal.d (date/time types), collations.d (collation -> code page,
                        generated from the server's catalog), encode.d (values in a column's exact
@@ -133,7 +134,7 @@ Run the integration tests with `MSSQL_HOST=localhost:11433 MSSQL_USER=sa MSSQL_P
 - `rowversion` is `binary(8)` with user type 80 (big-endian counter); `CONVERT(..., rv, 1)` is not allowed, cast to `varbinary(8)` first.
 - Double-byte code pages: a lead byte plus a trail byte is one character, an invalid pair the default character (U+30FB for 932, `?` otherwise), a lead byte before 0x00 the default character and the 0x00, a lead byte at the end nothing (checked on every pair; tables in dbwire `charset/tables`).
 
-- `getString` gives the text SQL Server writes, checked by `integrationtests.types` against `CONVERT(nvarchar(max), x[, style])`. Where the default `CONVERT` loses information, the lossless style is used: `money` style 2 (4 fraction digits; style 0 has 2), `datetime` style 121 (style 0 is `Jan 31 2024 12:34PM`), `smalldatetime` style 120, binary style 1 (`0x01AB`). `real`/`float` give the shortest text that reads back exactly (`CONVERT` style 0 keeps 6 digits; style 3 always 17): dbwire's `shortestDigits` with `Ties.avoid` in `%g`'s layout, so `100` is `1e+02` (#41). Ties must be avoided: SQL Server's text parser doesn't round halfway texts to even (`CAST('-3.668192745606422e+16' AS float)` is 0xC3604A4098F6405B, the correctly rounded value ...5C), and it makes every subnormal 0 (`CAST('4.9406564584124654e-324' AS float)` = 0), checked on 2022.
+- `getString` gives the text SQL Server writes, checked by `integrationtests.types` against `CONVERT(nvarchar(max), x[, style])`. Where the default `CONVERT` loses information, the lossless style is used: `money` style 2 (4 fraction digits; style 0 has 2), `datetime` style 121 (style 0 is `Jan 31 2024 12:34PM`), `smalldatetime` style 120, binary style 1 (`0x01AB`). `real`/`float` give the shortest text that reads back exactly (`CONVERT` style 0 keeps 6 digits; style 3 always 17): dbwire's `shortestDigits` with `Ties.avoid`, laid out by `formatDigits` as `%g`, so `100` is `1e+02` (#41). Ties must be avoided: SQL Server's text parser doesn't round halfway texts to even (`CAST('-3.668192745606422e+16' AS float)` is 0xC3604A4098F6405B, the correctly rounded value ...5C), and it makes every subnormal 0 (`CAST('4.9406564584124654e-324' AS float)` = 0), checked on 2022.
 - `datetime` holds 1/300 s; SQL Server shows milliseconds as `(ticks * 10 + 1) / 3` (.000, .003, .007); the getters use the same milliseconds.
 - `datetimeoffset` is sent as UTC time and date, then the offset in minutes (signed 16-bit); text and `getDate`/`getTime`/`getDateTime` use the local time at that offset.
 - Dates and times with fewer fraction digits are rounded by the server, not truncated (`time(0)` of `...58.9` is `...59`).

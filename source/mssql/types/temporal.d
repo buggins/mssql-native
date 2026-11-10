@@ -87,69 +87,44 @@ struct Temporal
     +/
     string toString() const @safe pure
     {
-        char[64] text;
-        size_t n;
-        // `v` in decimal, zero-padded to `width` digits
-        void put(long v, size_t width)
-        {
-            if (v < 0)
-            {
-                text[n++] = '-';
-                v = -v;
-            }
-            size_t k = 1;
-            for (long rest = v / 10; rest; rest /= 10)
-                k++;
-            if (k < width)
-                k = width;
-            foreach_reverse (i; 0 .. k)
-            {
-                text[n + i] = cast(char)('0' + v % 10);
-                v /= 10;
-            }
-            n += k;
-        }
+        import dbwire.types.text : TextBuffer;
 
-        void sep(char c)
-        {
-            text[n++] = c;
-        }
-
+        TextBuffer!128 t; // room for any field values, also ones not built by decodeTemporal
         if (kind != TemporalKind.time)
         {
             const d = date;
-            put(d.year, 4);
-            sep('-');
-            put(d.month, 2);
-            sep('-');
-            put(d.day, 2);
+            t.number(d.year, 4);
+            t.put('-');
+            t.number(d.month, 2);
+            t.put('-');
+            t.number(d.day, 2);
             if (kind == TemporalKind.date)
-                return text[0 .. n].idup;
-            sep(' ');
+                return t.text;
+            t.put(' ');
         }
         const seconds = ticks / ticksPerSecond;
-        put(seconds / 3600, 2);
-        sep(':');
-        put(seconds / 60 % 60, 2);
-        sep(':');
-        put(seconds % 60, 2);
+        t.number(seconds / 3600, 2);
+        t.put(':');
+        t.number(seconds / 60 % 60, 2);
+        t.put(':');
+        t.number(seconds % 60, 2);
         if (digits > 0)
         {
-            sep('.');
-            const start = n;
-            put(ticks % ticksPerSecond, 7);
-            n = start + (digits < 7 ? digits : 7);
+            t.put('.');
+            const start = t.length;
+            t.number(ticks % ticksPerSecond, 7);
+            t.length = start + (digits < 7 ? digits : 7);
         }
         if (kind == TemporalKind.dateTimeOffset)
         {
             const int a = offset < 0 ? -cast(int) offset : offset;
-            sep(' ');
-            sep(offset < 0 ? '-' : '+');
-            put(a / 60, 2);
-            sep(':');
-            put(a % 60, 2);
+            t.put(' ');
+            t.put(offset < 0 ? '-' : '+');
+            t.number(a / 60, 2);
+            t.put(':');
+            t.number(a % 60, 2);
         }
-        return text[0 .. n].idup;
+        return t.text;
     }
 }
 
