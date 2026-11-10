@@ -59,7 +59,11 @@ ubyte[] buildLogin7(const ref Login7 login) @safe pure
 
     void field(const(ubyte)[] utf16)
     {
+        import mssql.exception : ClientException;
+
         const offset = login7HeaderSize + data.length;
+        if (offset + utf16.length > ushort.max) // offsets and lengths are 16-bit (the server allows 128 characters)
+            throw new ClientException("The login's names and password are too long");
         table ~= le16(offset);
         table ~= le16(utf16.length / 2); // in characters
         data ~= utf16;

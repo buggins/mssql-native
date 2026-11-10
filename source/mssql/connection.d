@@ -20,7 +20,8 @@ module mssql.connection;
 
 import dbwire.client.hosts : connectFirst, orderHosts;
 import dbwire.client.pool : Poolable;
-import dbwire.io.backend : IoBackend, backendFor;
+import core.thread : Thread;
+import dbwire.io.backend : IoBackend, IoLock, backendFor;
 import dbwire.io.buffer : BufferedReader;
 import dbwire.io.transport : Transport;
 import dbwire.tls.transport : TlsContext, TlsOptions, TlsTransport, TlsVersion;
@@ -35,7 +36,7 @@ import mssql.mapping : RowRange, columnNames, fieldParameters, fieldPositions, q
 import mssql.params : Parameter, declarations, numbered, parameters, rewritePlaceholders, withDecimalScale;
 import std.range.primitives : ElementType, isInputRange;
 import mssql.prepared : PreparedStatement;
-import mssql.protocol.rpc : OutputParameter, ProcId, putParameter, putProcedure, readReturnValue;
+import mssql.protocol.rpc : OutputParameter, ProcId, checkRpc, putParameter, putProcedure, readReturnValue;
 import mssql.protocol.tokens;
 import mssql.result : QueryResult;
 import mssql.settings : ConnectionOptions, HostPort;
@@ -65,7 +66,9 @@ final class Connection : Poolable
     package PacketReader packets;
     package BufferedReader reader;
     private ulong transactionDescriptor; // 0 outside transactions (ENVCHANGE begin/commit/rollback)
-    private ServerMessage[] errors; // ERROR tokens of the current response
+    private ServerMessage[] errors; // ERROR tokens of the current response (at most maxErrors, plus fatal ones)
+    private enum maxErrors = 100;
+    private Exception messageError; // thrown by onMessage during the current response, rethrown at its end
     package OutputParameter[] responseOutputs; // RETURNVALUE tokens of the current response
     package bool responseHasStatus; // whether the current response had a RETURNSTATUS
     package int responseStatus; // its value
@@ -81,6 +84,13 @@ final class Connection : Poolable
     private string loginDatabase, loginLanguage; // the session state after login, restored by a reset
     private Collation loginCollation;
     private uint negotiatedPacketSize = defaultPacketSize;
+    private IoLock writeLock; // cancel() and the request/response transitions
+    private Thread owner; // fiber mode: the thread the connection belongs to
+    private bool transportLeftOpen; // closed from another thread: the owner's next close() closes the socket
+    private bool requestSent; // the current request is fully written (under writeLock)
+    private bool attentionDeferred; // cancel() came while the request was being written (under writeLock)
+    package ulong requestNumber; // incremented with each request: results know whether they still own the stream
+    package ulong lease; // counts the times a pool took the connection back: older statements and inserters refuse
 
     /++
     Called with each informational message (INFO token: `PRINT` output,
@@ -534,25 +544,60 @@ final class Connection : Poolable
     `ClientException`; the connection then stays usable.
 
     This is the one method that may be called from another thread or task
-    while the connection is busy. It does nothing if no batch is running.
+    while the connection is busy (for a fiber-mode connection: a task of its
+    own thread; from another thread it does nothing). It does nothing if no
+    batch is running. A cancel that comes while the request is still being
+    written is sent right after it; one that comes after the batch ended does
+    nothing, so it never cancels another batch.
     +/
-    void cancel() @safe
+    void cancel() @safe nothrow
     {
-        import core.atomic : cas;
+        import core.atomic : atomicLoad, atomicStore;
 
-        if (state != State.busy)
-            return;
-        if (!cas(&attentionPending, false, true))
-            return; // already sent
-        static immutable ubyte[packetHeaderSize] attention = [
-            PacketType.attention, PacketStatus.endOfMessage, 0, packetHeaderSize, 0, 0, 1, 0
-        ];
+        if (writeLock is null || !onOwnerThread)
+            return; // a fiber-mode connection's socket belongs to its thread's event loop
         try
-            transport.write(attention[]);
-        catch (Exception e)
         {
-            close();
-            throw e;
+            writeLock.lock();
+            scope (exit)
+                writeLock.unlock();
+            if (state != State.busy || requestNumber == 0 || atomicLoad(attentionPending))
+                return; // nothing running (or still connecting), or already cancelled
+            atomicStore(attentionPending, true);
+            if (!requestSent)
+            {
+                attentionDeferred = true; // sent right after the request's last packet
+                return;
+            }
+            try
+                transport.write(attentionPacket[]);
+            catch (Exception)
+            {
+                atomicStore(attentionPending, false);
+                transport.close(); // part of it may be out: the reading side sees a broken connection
+            }
+        }
+        catch (Exception)
+        {
+            // the lock failed: nothing was sent
+        }
+    }
+
+    private static immutable ubyte[packetHeaderSize] attentionPacket = [
+        PacketType.attention, PacketStatus.endOfMessage, 0, packetHeaderSize, 0, 0, 1, 0
+    ];
+
+    /// After the request's last packet: from now on an attention may follow it.
+    private void requestWritten() @safe
+    {
+        writeLock.lock();
+        scope (exit)
+            writeLock.unlock();
+        requestSent = true;
+        if (attentionDeferred)
+        {
+            attentionDeferred = false;
+            transport.write(attentionPacket[]);
         }
     }
 
@@ -603,6 +648,10 @@ final class Connection : Poolable
     {
         checkOpen();
         resetPending = true;
+        // as the session will be after the reset
+        transactionDescriptor = 0;
+        currentDatabase = loginDatabase;
+        currentLanguage = loginLanguage;
     }
 
     /// Checks that the server answers.
@@ -611,12 +660,30 @@ final class Connection : Poolable
         exec("SELECT 1");
     }
 
-    /// Closes the connection. Calling it again does nothing.
+    /++
+    Closes the connection. Calling it again does nothing.
+
+    A fiber-mode connection closed from another thread than its own is only
+    marked closed (its socket belongs to that thread's event loop); a later
+    `close()` on its own thread closes the socket.
+    +/
     void close() @safe nothrow
     {
         if (state == State.closed)
+        {
+            if (transportLeftOpen && onOwnerThread) // closed from another thread: the socket goes now
+            {
+                transportLeftOpen = false;
+                transport.close();
+            }
             return;
+        }
         state = State.closed;
+        if (!onOwnerThread)
+        {
+            transportLeftOpen = transport !is null; // the socket belongs to another thread's event loop
+            return;
+        }
         if (transport !is null)
             transport.close();
     }
@@ -656,12 +723,23 @@ final class Connection : Poolable
                 done = readDone(reader, cast(TokenType) token);
                 return Event.done;
             case TokenType.error:
-                errors ~= readMessage(reader);
+                // a batch that keeps failing (a loop hitting a constraint) sends errors until it ends: the first
+                // ones are kept, and the fatal ones (severity 20 and up: the server closes the connection)
+                const message = readMessage(reader);
+                if (errors.length < maxErrors || message.severity >= 20)
+                    errors ~= message;
                 break;
             case TokenType.info:
                 const message = readMessage(reader);
                 if (onMessage !is null)
-                    onMessage(message);
+                {
+                    // kept until the response is read: thrown now, it would leave the stream mid-response
+                    try
+                        onMessage(message);
+                    catch (Exception e)
+                        if (messageError is null)
+                            messageError = e;
+                }
                 break;
             case TokenType.envChange:
                 applyEnvChange(readEnvChange(reader));
@@ -686,7 +764,7 @@ final class Connection : Poolable
                 readShortToken(reader);
                 break;
             case TokenType.sessionState:
-                reader.readExactBytes(reader.readFixed!uint());
+                skipBytes(reader, reader.readFixed!uint());
                 break;
             default:
                 throw new ProtocolException("Unexpected token 0x" ~ hexByte(token) ~ " in the server's response");
@@ -707,30 +785,51 @@ final class Connection : Poolable
             // acknowledges a cancel: the batch is over, its errors no longer matter
             if (!packets.messageEnded)
                 throw new ProtocolException("The server's response continues after its attention acknowledgement");
-            atomicStore(attentionPending, false);
+            {
+                writeLock.lock();
+                scope (exit)
+                    writeLock.unlock();
+                atomicStore(attentionPending, false);
+                state = State.ready;
+            }
             errors = null;
-            state = State.ready;
+            messageError = null;
             return true;
         }
         if (done.more || done.token == TokenType.doneInProc)
             return false;
         if (!packets.messageEnded)
             throw new ProtocolException("The server's response continues after its last DONE token");
-        if (atomicLoad(attentionPending))
+        bool pending;
+        {
+            writeLock.lock();
+            scope (exit)
+                writeLock.unlock();
+            pending = atomicLoad(attentionPending);
+            if (!pending)
+                state = State.ready; // under the lock: a cancel either came before (pending) or sees "ready"
+        }
+        if (pending)
         {
             // the response ended before the server saw the cancel: the acknowledgement follows in a message of its own
             packets.beginMessage();
             return false;
         }
-        state = State.ready;
         if (errors.length)
         {
             auto e = errors;
             errors = null;
+            messageError = null;
             foreach (m; e)
                 if (m.severity >= 20)
                     close(); // the server closes the connection after fatal errors
             throw new ServerException(e);
+        }
+        if (messageError !is null)
+        {
+            scope (exit)
+                messageError = null;
+            throw messageError; // the response is read: the connection stays usable
         }
         return true;
     }
@@ -761,15 +860,36 @@ final class Connection : Poolable
     +/
     package void guarded(scope void delegate() @safe action) @safe
     {
+        checkThread(); // before the try: closing from another thread would touch its event loop
+        bool usable;
+        scope (exit)
+            if (!usable)
+                close();
         try
+        {
             action();
-        catch (ServerException e)
-            throw e;
+            usable = true;
+        }
         catch (Exception e)
         {
-            close();
+            // a response read to its end (a ServerException, or onMessage's exception) leaves the connection
+            // usable; any other exception (an Error too: not caught) leaves the stream in an unknown state
+            usable = state != State.busy;
             throw e;
         }
+    }
+
+    // A fiber-mode connection is used from the thread that opened it; its socket belongs to that event loop.
+    private void checkThread() const @safe
+    {
+        if (!onOwnerThread)
+            throw new ClientException(
+                    "A fiber-mode connection was used from a thread other than the one that opened it");
+    }
+
+    private bool onOwnerThread() const @safe nothrow
+    {
+        return owner is null || Thread.getThis() is owner;
     }
 
     // --- requests ---
@@ -782,6 +902,7 @@ final class Connection : Poolable
             putAllHeaders();
             writer.put(encodeUtf16le(sql));
             writer.end();
+            requestWritten();
             statusWanted = false;
             beginResponse();
         });
@@ -807,6 +928,7 @@ final class Connection : Poolable
     /// Sends an RPC request: procedure `name`, or system procedure `id` when `name` is empty.
     package void sendRpc(string name, ushort id, const Parameter[] params) @safe
     {
+        checkRpc(name, params); // before anything is sent: a bad request leaves the connection as it is
         startRequest();
         guarded({
             writer.begin(PacketType.rpc, requestStatus());
@@ -816,6 +938,7 @@ final class Connection : Poolable
             foreach (ref p; params)
                 putParameter(writer, p, defaultCollation);
             writer.end();
+            requestWritten();
             beginResponse();
         });
     }
@@ -839,50 +962,35 @@ final class Connection : Poolable
     package ulong endBulkData() @safe
     {
         static immutable ubyte[13] done = [0xFD, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        guarded({ writer.put(done[]); writer.end(); statusWanted = false; beginResponse(); });
+        guarded({
+            writer.put(done[]);
+            writer.end();
+            requestWritten();
+            statusWanted = false;
+            beginResponse();
+        });
         return readExecResponse();
     }
 
     /// Ends the bulk load message with the IGNORE flag: the server discards it.
     package void abortBulkData() @safe
     {
-        guarded({ writer.endIgnored(); statusWanted = false; beginResponse(); });
+        guarded({ writer.endIgnored(); requestWritten(); statusWanted = false; beginResponse(); });
         readExecResponse();
     }
 
     /// Checks the connection is ready and marks it busy; reads a late cancel acknowledgement first.
     private void startRequest() @safe
     {
-        import core.atomic : atomicLoad;
-
+        // (no cancel can be pending here: one that crosses the end of a response is acknowledged within it)
         checkReady();
-        state = State.busy;
-        if (atomicLoad(attentionPending))
         {
-            // a cancel crossed the end of the previous response: read its acknowledgement
-            guarded({
-                beginResponse();
-                for (;;)
-                {
-                    Done done;
-                    final switch (nextEvent(done))
-                    {
-                    case Event.metadata:
-                        readColumnMetadata(reader);
-                        break;
-                    case Event.row:
-                    case Event.nbcRow:
-                        throw new ProtocolException("Rows in a cancel acknowledgement");
-                    case Event.done:
-                        if (finishIfFinal(done))
-                        {
-                            state = State.busy;
-                            return;
-                        }
-                        break;
-                    }
-                }
-            });
+            writeLock.lock();
+            scope (exit)
+                writeLock.unlock();
+            state = State.busy;
+            requestSent = false;
+            requestNumber++;
         }
     }
 
@@ -903,6 +1011,7 @@ final class Connection : Poolable
         responseOutputs = null;
         responseHasStatus = false;
         responseStatus = 0;
+        messageError = null;
     }
 
     /// ALL_HEADERS with the transaction descriptor header ([MS-TDS] 2.2.5.3).
@@ -925,6 +1034,7 @@ final class Connection : Poolable
     {
         if (state == State.closed)
             throw new ClientException("The connection is closed");
+        checkThread(); // before anything changes
         if (state == State.busy)
             throw new ClientException("The connection is busy: read or close the previous query result first");
     }
@@ -942,10 +1052,16 @@ final class Connection : Poolable
             currentLanguage = e.newValue;
             break;
         case EnvChangeType.packetSize:
+            import mssql.protocol.packet : maxPacketSize, minPacketSize;
+
+            uint size;
             try
-                negotiatedPacketSize = e.newValue.to!uint;
+                size = e.newValue.to!uint;
             catch (ConvException)
                 throw new ProtocolException("Invalid packet size from the server: " ~ e.newValue);
+            if (size < minPacketSize || size > maxPacketSize)
+                throw new ProtocolException("Invalid packet size from the server: " ~ e.newValue);
+            negotiatedPacketSize = size;
             break;
         case EnvChangeType.collation:
             if (e.newBytes.length == 5)
@@ -991,6 +1107,9 @@ final class Connection : Poolable
     private void connect() @safe
     {
         backend = backendFor(options.ioMode);
+        writeLock = backend.newLock();
+        if (backend.name == "vibe")
+            owner = Thread.getThis();
         auto hosts = options.hosts.length ? options.hosts.dup : [
             HostPort(options.host, options.port)
         ];
@@ -1383,4 +1502,257 @@ version (unittest)
     assert(server.written[$ - 8 .. $] == [PacketType.attention, 0x01, 0, 8, 0, 0, 1, 0]);
     auto r = new QueryResult(conn);
     assert(r.empty && r.cancelled && !conn.isBusy && r.counts.length == 1);
+}
+
+// --- robustness (#40), against replayed responses ---
+
+version (unittest)
+{
+    // A DONE token (status, command, row count).
+    private ubyte[] doneToken(ushort status, ushort command = 0, ulong rows = 0) @safe pure
+    {
+        ubyte[] b = [
+            0xFD, cast(ubyte) status, cast(ubyte)(status >> 8), cast(ubyte) command,
+            cast(ubyte)(command >> 8)
+        ];
+        foreach (i; 0 .. 8)
+            b ~= cast(ubyte)(rows >> (8 * i));
+        return b;
+    }
+
+    // The first INFO token of the captured login response ("Changed database context to 'master'.").
+    private immutable(ubyte)[] infoToken() @safe pure
+    {
+        foreach (i, b; capturedLogin)
+            if (b == 0xAB)
+                return capturedLogin[i .. i + 3 + (capturedLogin[i + 1] | (capturedLogin[i + 2] << 8))];
+        assert(0);
+    }
+
+    // A transport over a MockTransport that runs a hook during its next write.
+    private final class WriteHook : Transport
+    {
+        MockTransport mock;
+        void delegate() @safe duringWrite;
+
+        this() @safe
+        {
+            mock = new MockTransport;
+        }
+
+        override size_t read(scope ubyte[] b) @safe
+        {
+            return mock.read(b);
+        }
+
+        override void write(scope const(ubyte)[] data) @safe
+        {
+            mock.write(data);
+            if (duringWrite !is null)
+            {
+                auto f = duringWrite;
+                duringWrite = null;
+                f();
+            }
+        }
+
+        override bool dataAvailable() @safe
+        {
+            return mock.dataAvailable;
+        }
+
+        override void close() @safe nothrow
+        {
+            mock.close();
+        }
+
+        override bool connected() const @safe nothrow
+        {
+            return mock.connected;
+        }
+
+        override void setTimeouts(Duration receive, Duration send) @safe
+        {
+        }
+    }
+
+    // A connection logged in over `t` (the replayed PRELOGIN and login responses are fed first).
+    private Connection loggedIn(Transport t, MockTransport feed) @safe
+    {
+        feed.feed(serverMessage(preloginNoTls));
+        feed.feed(serverMessage(capturedLogin));
+        ConnectionOptions options;
+        options.user = "sa";
+        options.password = "secret";
+        options.encrypt = false;
+        Transport factory(string, ushort, Duration)
+        {
+            return t;
+        }
+
+        options.transportFactory = &factory;
+        return new Connection(options);
+    }
+}
+
+// A cancel while the request is being written is sent after its last packet, not inside it
+@safe unittest
+{
+    auto t = new WriteHook;
+    auto conn = loggedIn(t, t.mock);
+    t.mock.clearWritten();
+    void cancelNow() @safe
+    {
+        conn.cancel();
+    }
+
+    t.duringWrite = &cancelNow;
+    conn.sendBatch("SELECT 1");
+    const w = t.mock.written;
+    assert(w[0] == PacketType.sqlBatch && w[$ - 8 .. $] == [
+        PacketType.attention, 0x01, 0, 8, 0, 0, 1, 0
+    ]);
+    assert(w[1] == PacketStatus.endOfMessage); // the batch's one packet is complete before the attention
+}
+
+// A server error while reading rows ends the result: close() reads nothing more, the connection stays usable
+@safe unittest
+{
+    auto server = new MockTransport;
+    auto conn = loggedIn(server, server);
+    server.feed(serverMessage(capturedQuery[0 .. $ - 13] ~ capturedError)); // the row, then an error ending the batch
+    server.feed(serverMessage(capturedQuery));
+    auto r = conn.query("SELECT ...");
+    assert(!r.empty);
+    r.popFront();
+    bool thrown;
+    try
+        r.empty;
+    catch (ServerException e)
+        thrown = e.number == 2812;
+    assert(thrown && conn.isOpen && !conn.isBusy);
+    r.close(); // nothing to read: the response is over
+    assert(conn.isOpen && conn.queryValue!int("SELECT 1 AS a, ...") == 1);
+}
+
+// query!T: a value that doesn't fit closes the result
+@safe unittest
+{
+    import std.exception : assertThrown;
+
+    static struct S
+    {
+        byte h; // 200 doesn't fit
+    }
+
+    auto server = new MockTransport;
+    auto conn = loggedIn(server, server);
+    server.feed(serverMessage(capturedQuery));
+    assertThrown!ClientException({
+        foreach (s; conn.query!S("SELECT ..."))
+        {
+        }
+    }());
+    assert(conn.isOpen && !conn.isBusy);
+}
+
+// Server data: many empty packets are read in a loop; an invalid packet size is a protocol error
+@safe unittest
+{
+    auto server = new MockTransport;
+    auto conn = loggedIn(server, server);
+    ubyte[] empties;
+    foreach (i; 0 .. 100_000)
+        empties ~= [PacketType.tabularResult, 0, 0, 8, 0, 0, 1, 0]; // empty, not the last
+    server.feed(empties);
+    server.feed(serverMessage(doneToken(0, 0xC1)));
+    conn.exec("SELECT 1");
+    assert(conn.isOpen);
+
+    auto login = capturedLogin.dup; // the packet size change "4096" becomes "0000"
+    foreach (i; 9 .. login.length)
+        if (login[i - 9 .. i - 4] == [0xE3, 0x13, 0x00, 0x04, 0x04])
+        {
+            foreach (k; 0 .. 4)
+                login[i - 4 + 2 * k] = '0';
+            break;
+        }
+    server = new MockTransport;
+    server.feed(serverMessage(preloginNoTls));
+    server.feed(serverMessage(login));
+    ConnectionOptions options;
+    options.encrypt = false;
+    Transport factory(string, ushort, Duration)
+    {
+        return server;
+    }
+
+    options.transportFactory = &factory;
+    import std.exception : collectException;
+    import std.string : indexOf;
+
+    // a protocol error moves to the next host; with none left, a ConnectionException says why
+    const e = collectException!ConnectionException(new Connection(options));
+    assert(e !is null && e.msg.indexOf("Invalid packet size") >= 0, e is null ? "" : e.msg);
+}
+
+// An exception from onMessage comes after the response was read: the connection stays usable
+@safe unittest
+{
+    auto server = new MockTransport;
+    auto conn = loggedIn(server, server);
+    void fail(ServerMessage) @safe
+    {
+        throw new Exception("from onMessage");
+    }
+
+    conn.onMessage = &fail;
+    server.feed(serverMessage(infoToken ~ doneToken(0, 0xC1)));
+    bool thrown;
+    try
+        conn.exec("PRINT 'x'");
+    catch (Exception e)
+        thrown = e.msg == "from onMessage";
+    assert(thrown && conn.isOpen && !conn.isBusy);
+    conn.onMessage = null;
+    server.feed(serverMessage(doneToken(0, 0xC1)));
+    conn.exec("SELECT 1");
+}
+
+// A fiber-mode connection used from another thread is refused; close() from there only marks it closed
+@system unittest
+{
+    import std.exception : assertThrown;
+
+    auto server = new MockTransport;
+    auto conn = loggedIn(server, server);
+    void nothing()
+    {
+    }
+
+    conn.owner = new Thread(&nothing);
+    server.clearWritten();
+    assertThrown!ClientException(conn.exec("SELECT 1"));
+    conn.cancel(); // nothing
+    assert(conn.isOpen && server.written.length == 0);
+    conn.close();
+    assert(!conn.isOpen && server.connected); // only marked closed
+    conn.owner = null; // back on the owning thread: close() closes the socket
+    conn.close();
+    assert(!server.connected);
+}
+
+// Requests that can't be written are refused before anything is sent
+@safe unittest
+{
+    import std.array : replicate;
+    import std.datetime.date : Date;
+    import std.exception : assertThrown;
+
+    auto server = new MockTransport;
+    auto conn = loggedIn(server, server);
+    server.clearWritten();
+    assertThrown!ClientException(conn.callProcedure("p", Parameter.of(1).named("x".replicate(256))));
+    assertThrown!ClientException(Parameter.of(Date(10_000, 1, 1)));
+    assert(conn.isOpen && !conn.isBusy && server.written.length == 0);
 }

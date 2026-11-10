@@ -6,6 +6,55 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+From the code review (#40):
+
+- `cancel()` racing with the start of a request could desynchronize the
+  connection: the attention went out before the request, its acknowledgement
+  was taken for the request's response, and the next query returned the
+  previous one's rows; during a long request it landed inside the request
+  message, and a late one could cancel the next batch. `cancel()` is now
+  checked and sent under the lock the requests take: one that comes while a
+  request is written goes out right after it; one that comes after the batch
+  ended cancels nothing else. It is `nothrow`.
+- A `ServerException` while reading rows left the `QueryResult` unfinished:
+  `close()` (`scope (exit) r.close()`) then read on, closing the intact
+  connection or taking another result's rows. Results now stop once their
+  response is over, failed, or the connection moved on to another request.
+- `query!T`: a value that didn't convert left the connection busy; the
+  result is closed now.
+- A prepared statement whose first execution failed lost its server handle.
+- An exception from `onMessage` closed the connection; it is thrown after the
+  response was read, and the connection stays usable.
+- A fiber-mode connection used from another thread is refused before anything
+  changes (it was closed from that thread); `close()` from there only marks
+  it closed (a later `close()` on its own thread closes the socket),
+  `cancel()` does nothing. A result whose connection was closed before it was
+  read throws instead of looking complete.
+- Server data that could crash the client or exhaust its memory: many empty
+  packets (recursion), an invalid packet size in ENVCHANGE (an `AssertError`,
+  a 4 GB buffer, or a desynchronized stream; now a protocol error), session
+  state and feature acknowledgements and values whose announced lengths were
+  allocated before any data arrived. At most 100 errors (plus fatal ones) are
+  kept per response.
+- `ConnectionPool`: a returned connection (`release()`, or the
+  `PooledConnection` going out of scope) is rolled back right away (its locks
+  were held while idle; checked on SQL Server 2022), `onMessage` is cleared,
+  and statements and bulk inserters of the previous borrower are refused;
+  `resetSession()` reports the reset state (`inTransaction`, `database`,
+  `language`) at once.
+- Requests that can't be written are refused before anything is sent:
+  parameter names over 255 UTF-16 code units, parameters of types that can't
+  be sent (an `assert` mid-request before), login fields too long for LOGIN7,
+  dates outside 0001–9999 (they wrapped around).
+- `BulkInserter.abort()` on a closed connection no longer replaces the
+  original error; the collations of a table in another database are looked
+  up with the database name quoted (`[my db]`).
+- `ConnectionOptions.toString` hides `password` and `tls.keyPassword`, and
+  errors about an ADO.NET connection string no longer show the rest of a
+  password with an unquoted `;`.
+
 ### Changed
 
 - dbwire 0.9 (`~>0.9.0`), like clickhoused, postgresql-native and

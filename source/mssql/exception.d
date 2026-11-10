@@ -57,7 +57,7 @@ class ServerException : DbException
 {
     /// The first error.
     ServerMessage error;
-    /// All errors of the statement, the first included.
+    /// All errors of the statement, the first included (the first 100, and any fatal ones after them).
     ServerMessage[] errors;
 
     /++

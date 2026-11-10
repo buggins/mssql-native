@@ -205,13 +205,11 @@ final class PacketReader : Transport
 
     override size_t read(scope ubyte[] buffer) @safe
     {
-        if (remaining == 0)
+        while (remaining == 0) // empty packets: a loop, not recursion (a server may send many)
         {
             if (started && lastPacket)
                 throw new ProtocolException("The server's message ended before the data it announced");
             readHeader();
-            if (remaining == 0)
-                return read(buffer); // an empty packet
         }
         const want = buffer.length < remaining ? buffer.length : remaining;
         const n = transport.read(buffer[0 .. want]);

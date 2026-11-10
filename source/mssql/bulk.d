@@ -54,6 +54,7 @@ call `finish`, or `abort` to discard the rows of the current batch.
 final class BulkInserter
 {
     private Connection conn;
+    private ulong lease; // the connection's lease (pooled connections)
     private string table;
     private string[] names;
     private TypeInfo[] types;
@@ -72,6 +73,7 @@ final class BulkInserter
         import mssql.mapping : quoteIdentifier;
 
         this.conn = conn;
+        lease = conn.lease;
         this.table = table;
         this.options = options;
         // the columns' types, as the table has them
@@ -218,6 +220,7 @@ final class BulkInserter
     {
         if (done)
             return inserted;
+        checkOpen();
         done = true;
         if (sending)
             endBatch();
@@ -234,7 +237,8 @@ final class BulkInserter
         if (done)
             return;
         done = true;
-        if (sending)
+        // a closed connection, or one returned to its pool: nothing to end (and the original error stays)
+        if (sending && conn.isOpen && conn.lease == lease)
         {
             sending = false;
             inBatch = 0;
@@ -271,6 +275,8 @@ final class BulkInserter
     {
         if (done)
             throw new ClientException("The bulk insert is finished");
+        if (conn.lease != lease)
+            throw new ClientException("The bulk insert began before the pooled connection was returned");
     }
 }
 
@@ -281,8 +287,10 @@ database for three-part names).
 +/
 private string[string] columnCollations(Connection conn, string table) @safe
 {
-    const parts = nameParts(table);
-    string db = parts.length == 3 ? parts[0] ~ ".." : "";
+    import mssql.mapping : quoteIdentifier;
+
+    const parts = nameParts(table); // unquoted: quoted again for the EXEC (`[my db]..sp_...`)
+    string db = parts.length == 3 ? quoteIdentifier(parts[0]) ~ ".." : "";
     if (parts.length && parts[$ - 1].length && parts[$ - 1][0] == '#')
         db = "tempdb..";
     string[string] result;

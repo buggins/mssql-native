@@ -63,6 +63,32 @@ void testPool()
         enforce(c.exec("CREATE TABLE #n (v int); INSERT INTO #n VALUES (1)") == 1, "NOCOUNT reset");
     }
 
+    // a returned connection is rolled back at once (its locks are not held while it is idle) and loses its
+    // message callback
+    auto other = connectToServer();
+    scope (exit)
+        other.close();
+    other.exec("IF OBJECT_ID('tempdb..##itest_pool') IS NOT NULL DROP TABLE ##itest_pool;"
+            ~ " CREATE TABLE ##itest_pool (v int)");
+    scope (exit)
+        other.exec("DROP TABLE ##itest_pool");
+    {
+        auto c = pool.lockConnection();
+        c.exec("BEGIN TRANSACTION; INSERT INTO ##itest_pool VALUES (1)");
+        enforce(c.inTransaction, "in a transaction");
+        void listener(ServerMessage) @safe
+        {
+        }
+
+        c.onMessage = &listener;
+    }
+    other.exec("SET LOCK_TIMEOUT 2000");
+    enforce(scalar(other, "SELECT COUNT(*) FROM ##itest_pool") == "0", "rolled back on release (no lock left)");
+    {
+        auto c = pool.lockConnection();
+        enforce(c.onMessage is null && !c.inTransaction, "the callback cleared");
+    }
+
     // a connection returned busy (an unread result) is closed, not reused
     {
         auto c = pool.lockConnection();

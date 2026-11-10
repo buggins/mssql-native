@@ -478,9 +478,16 @@ ValueRef readValue(BufferedReader r, const ref TypeInfo t, ref ubyte[] data, siz
 
 private void append(BufferedReader r, ref ubyte[] data, size_t length) @safe
 {
-    const start = data.length;
-    data.length = start + length;
-    r.readExact(data[start .. $]);
+    // grow with the data that arrives, not by a length the server announces
+    enum size_t step = 1024 * 1024;
+    while (length)
+    {
+        const n = length < step ? length : step;
+        const start = data.length;
+        data.length = start + n;
+        r.readExact(data[start .. $]);
+        length -= n;
+    }
 }
 
 private ProtocolException tooLong(size_t maxLength) @safe pure
