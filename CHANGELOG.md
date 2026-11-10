@@ -6,6 +6,18 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+### Performance
+
+- `real`/`float` text (`getString`) from dbwire's `shortestDigits` instead of
+  up to 17 `format("%.*g")` and `to!double` attempts (#41): 3.6 to 5.4 times
+  faster, one allocation (doubles like prices: 0.89 µs and 277 B before,
+  0.25 µs and 16 B now). The layout stays `%g`'s. The text is never exactly
+  halfway between two values (`Ties.avoid`), so it reads back whatever way
+  the reader rounds ties (SQL Server's parser doesn't round them to even).
+  Some old texts didn't read back as the same value under C's `strtod`
+  (Phobos's parser accepted them), others were longer than needed. dbwire
+  `~>0.9.2` (which has `Ties.avoid`).
+
 ### Fixed
 
 From the code review (#40):
