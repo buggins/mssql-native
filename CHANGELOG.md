@@ -6,6 +6,12 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+## 0.3.0 — 2026-11-10
+
+The fixes and improvements from a code review: robustness, security and
+thread safety (#40), float text (#41), attributes, D idioms and dip1000
+(#42), performance (#43); and dbwire 0.9 (#38, #48).
+
 ### Changed
 
 From the review of attributes and D idioms (#42):
