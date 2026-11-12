@@ -416,16 +416,17 @@ The shortest decimal text that reads back as `value` (as a `float` if
 `single`) whatever way the reader rounds ties: dbwire's `shortestDigits`
 with `Ties.avoid`, never a text exactly halfway between two values (SQL
 Server reads the tie `-3.668192745606422e+16` as the lower neighbour, a
-correctly rounded `strtod` as the even one), laid out by `formatDigits` as
-`%g` with as many significant digits (plain when the decimal exponent X of
-d.ddd × 10^X is at least -4 and below the number of digits, else `d.ddde±XX`
-with at least two exponent digits): `0.1`, `-1.5`, `1e+300`, `1e+02`; `nan`,
-`-nan`, `inf`, `-inf` as `%g` writes them.
+correctly rounded `strtod` as the even one), laid out by `formatDigits`:
+plain when the decimal exponent X of d.ddd × 10^X is at least -4 and below
+15 (6 for `real`: the digits each type is guaranteed to hold; SQL Server's
+own text also writes `100`), else `d.ddde±XX` with at least two exponent
+digits: `0.1`, `-1.5`, `100`, `1e+15`, `1.5e-05`; `nan`, `-nan`, `inf`,
+`-inf` as `%g` writes them.
 +/
 private string shortestText(double value, bool single) @safe pure nothrow
 {
     import std.math : isInfinity, isNaN, signbit;
-    import dbwire.types.floattext : Ties, formatDigits, shortestDigits;
+    import dbwire.types.floattext : FloatLayout, Ties, formatDigits, shortestDigits;
 
     if (single)
         value = cast(float) value;
@@ -436,7 +437,7 @@ private string shortestText(double value, bool single) @safe pure nothrow
     if (value == 0)
         return signbit(value) ? "-0" : "0";
     const d = single ? shortestDigits(cast(float) value, Ties.avoid) : shortestDigits(value, Ties.avoid);
-    return formatDigits(d, signbit(value) != 0); // the default layout is %g
+    return formatDigits(d, signbit(value) != 0, FloatLayout(-4, single ? 6 : 15, false));
 }
 
 @safe unittest
@@ -448,14 +449,19 @@ private string shortestText(double value, bool single) @safe pure nothrow
     sum += 0.2; // at run time: a constant expression is folded at real precision
     assert(shortestText(sum, false) == "0.30000000000000004");
     assert(shortestText(-1.5, false) == "-1.5" && shortestText(1e300, false) == "1e+300");
-    assert(shortestText(100, false) == "1e+02" && shortestText(123_456_789.125, false) == "123456789.125");
+    assert(shortestText(100, false) == "100" && shortestText(123_456_789.125, false) == "123456789.125");
+    assert(shortestText(1e14, false) == "100000000000000" && shortestText(1e15, false) == "1e+15");
+    assert(shortestText(123_456_789_012_345.6, false) == "123456789012345.6");
+    assert(shortestText(1.2345678901234567e17, false) == "1.2345678901234566e+17");
+    assert(shortestText(100_000, true) == "100000" && shortestText(1_000_000, true) == "1e+06");
+    assert(shortestText(1_234_567, true) == "1.234567e+06" && shortestText(1e-5, true) == "1e-05");
     assert(shortestText(0.0001, false) == "0.0001" && shortestText(1.5e-5, false) == "1.5e-05");
     assert(shortestText(-0.0, false) == "-0" && shortestText(double.nan, false) == "nan");
     assert(shortestText(-double.infinity, false) == "-inf");
     assert(shortestText(double.max, false) == "1.7976931348623157e+308");
     assert(shortestText(ldexp(1.0, -1074), false) == "5e-324" && shortestText(float.max, true) == "3.4028235e+38");
     assert(shortestText(1e300, true) == "inf"); // a real: what the float becomes
-    assert(shortestText(-36_681_927_456_064_224.0, false) == "-36681927456064224"); // not the tie -3.668192745606422e+16
+    assert(shortestText(-36_681_927_456_064_224.0, false) == "-3.6681927456064224e+16"); // not the tie -3.668192745606422e+16
 }
 
 // `0x` and two upper-case hex digits per byte

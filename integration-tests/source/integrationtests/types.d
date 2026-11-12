@@ -292,6 +292,13 @@ void testFloats()
     }
     enforce(rows == 11, "rows");
 
+    // plain up to 15 digits before the point (6 for real), as the server's own text writes 100
+    r = conn.query("SELECT CAST(100 AS float), CAST(100 AS real), CAST(1e15 AS float), CAST(1.5e-5 AS float)");
+    enforce(r.next(), "a row");
+    enforce(r.getString(0) == "100" && r.getString(1) == "100" && r.getString(2) == "1e+15"
+            && r.getString(3) == "1.5e-05", r.getString(0) ~ " " ~ r.getString(1) ~ " " ~ r.getString(2));
+    r.close();
+
     // the text reads back on the server too, also where the shortest digits would be a tie (SQL Server reads
     // -3.668192745606422e+16 as the lower neighbour of -36681927456064224); not subnormals: the server's text
     // parser makes every subnormal 0 (even 4.9406564584124654e-324)
