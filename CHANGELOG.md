@@ -6,6 +6,15 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- A `PooledConnection` finalized by the GC (a field of an object nobody
+  references) no longer hands its connection back from the finalizer, which
+  called into a pool that may be finalized already (at exit: a segfault). It
+  now touches neither the pool nor the connection, which stays checked out:
+  call `release` before dropping an object that holds one (#54). Needs dbwire
+  0.9.6 (dbwire#79).
+
 ## 0.3.0 — 2026-11-10
 
 The fixes and improvements from a code review: robustness, security and
