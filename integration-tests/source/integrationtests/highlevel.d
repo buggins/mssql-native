@@ -44,6 +44,56 @@ void testConnectionStrings()
     enforce(e !is null && e.msg == "Unknown connection string key 'Colour'", e is null ? "accepted" : e.msg);
 }
 
+private shared int poolHoldersFinalized;
+
+private final class PoolHolder
+{
+    PooledConnection conn;
+
+    ~this()
+    {
+        import core.atomic : atomicOp;
+
+        atomicOp!"+="(poolHoldersFinalized, 1);
+    }
+}
+
+// A borrowed connection held only by an object nobody references any more; returns its session id.
+private string dropHolder(ConnectionPool pool)
+{
+    auto holder = new PoolHolder;
+    holder.conn = pool.lockConnection();
+    return scalar(holder.conn, "SELECT @@SPID");
+}
+
+// Overwrites the stack below the caller, where a dropped object's address may linger for the GC to see.
+private void clearStack()
+{
+    ubyte[16_384] junk;
+    junk[] = 0;
+    if (junk[$ - 1] != 0) // keeps the array from being optimized away
+        throw new Exception("never");
+}
+
+// A PooledConnection collected by the GC touches neither the pool nor the connection (either may be finalized
+// already): the connection stays checked out, and the next borrower gets another one.
+private void testPoolFinalizer(ConnectionPool pool)
+{
+    import core.atomic : atomicLoad;
+    import core.memory : GC;
+
+    const activeBefore = pool.activeConnections;
+    const spid = dropHolder(pool);
+    clearStack();
+    foreach (i; 0 .. 3)
+        GC.collect();
+    auto c = pool.lockConnection();
+    enforce(scalar(c, "SELECT @@SPID") != spid, "the next borrower gets another connection");
+    if (atomicLoad(poolHoldersFinalized) == 0)
+        return; // the GC still sees the holder (conservative stack scan): nothing more to check
+    enforce(pool.activeConnections == activeBefore + 2, "the collected connection stays checked out");
+}
+
 /// The pool reuses connections, resets their sessions, waits for a free one, and drops broken ones.
 void testPool()
 {
@@ -62,6 +112,7 @@ void testPool()
         enforce(c.database == "master" && scalar(c, "SELECT DB_NAME()") == "master", "database reset");
         enforce(c.exec("CREATE TABLE #n (v int); INSERT INTO #n VALUES (1)") == 1, "NOCOUNT reset");
     }
+    testPoolFinalizer(pool);
 
     // a returned connection is rolled back at once (its locks are not held while it is idle) and loses its
     // message callback

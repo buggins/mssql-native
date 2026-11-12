@@ -119,6 +119,11 @@ final class ConnectionPool
 A connection taken from a `ConnectionPool`. It behaves like the `Connection`
 itself and returns it to the pool when it goes out of scope (or on `release`).
 It cannot be copied.
+
+Call `release` before dropping an object that holds a `PooledConnection`: one
+the garbage collector finalizes can't touch the pool or the connection, so
+the connection is never returned (its slot stays taken and it stays open,
+with any open transaction, until the process ends).
 +/
 struct PooledConnection
 {
@@ -132,14 +137,10 @@ struct PooledConnection
         import core.memory : GC;
 
         // what release() does (rollback, reset) happens when it goes out of scope too; not in a GC finalizer
-        // (a PooledConnection inside a collected object), which must neither allocate nor block on the
-        // network: the connection is only handed back, and the next borrower's request resets the session
+        // (a PooledConnection inside a collected object), where the pool and the connection may be finalized
+        // already: touch neither (the lease leaves the pool alone too); the connection stays checked out
         if (GC.inFinalizer)
-        {
-            conn = null;
-            lease.release();
             return;
-        }
         release();
     }
 
