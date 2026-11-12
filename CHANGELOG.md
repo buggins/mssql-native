@@ -6,6 +6,12 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- Float text (`Value.toString`, `getString` in ddbc) is plain up to 15 digits
+  before the point (6 for `real`), like SQL Server's own text: `100` instead
+  of `1e+02`; `1e+15` and `1.5e-05` keep the exponent form (#52).
+
 ## 0.3.0 — 2026-11-10
 
 The fixes and improvements from a code review: robustness, security and
