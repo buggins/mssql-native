@@ -6,6 +6,11 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+## 0.3.1 — 2026-11-12
+
+Float text like SQL Server's own (`100`, not `1e+02`); a `PooledConnection`
+collected by the garbage collector no longer crashes; dbwire 0.9.6.
+
 ### Changed
 
 - Float text (`Value.toString`, `getString` in ddbc) is plain up to 15 digits
