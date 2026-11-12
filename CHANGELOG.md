@@ -12,6 +12,15 @@ All notable changes to mssql-native are documented here. The format follows
   before the point (6 for `real`), like SQL Server's own text: `100` instead
   of `1e+02`; `1e+15` and `1.5e-05` keep the exponent form (#52).
 
+### Fixed
+
+- A `PooledConnection` finalized by the GC (a field of an object nobody
+  references) no longer hands its connection back from the finalizer, which
+  called into a pool that may be finalized already (at exit: a segfault). It
+  now touches neither the pool nor the connection, which stays checked out:
+  call `release` before dropping an object that holds one (#54). Needs dbwire
+  0.9.6 (dbwire#79).
+
 ## 0.3.0 — 2026-11-10
 
 The fixes and improvements from a code review: robustness, security and
