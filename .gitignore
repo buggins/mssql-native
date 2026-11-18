@@ -35,3 +35,11 @@ dub.selections.json
 /examples/*/mssql-native_example-*
 /examples/*/example-*
 /bench/mssql-native-bench
+
+# Tools: only their sources are kept (built tools have no extension on Linux and macOS)
+/tools/*
+!/tools/*.*
+/tools/*.exe
+/tools/*.pdb
+/tools/*.o
+/tools/*.obj
