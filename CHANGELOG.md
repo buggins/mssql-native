@@ -6,6 +6,13 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+### Added
+
+- URL-style connection strings take the I/O mode option as `io_mode` too, its
+  main name in all connectors (buggins/dbwire#83, #58); `io` stays as the short
+  form. Giving both with different values is an error. ADO-style strings have
+  no I/O mode key (set `ConnectionOptions.ioMode`). Requires dbwire 0.9.8.
+
 ## 0.3.1 — 2026-11-12
 
 Float text like SQL Server's own (`100`, not `1e+02`); a `PooledConnection`

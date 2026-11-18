@@ -18,7 +18,7 @@ module mssql.settings;
 
 import core.time : Duration, seconds;
 
-import dbwire.client.dsn : Dsn, parseEnumValue, parseFlag, parseSeconds;
+import dbwire.client.dsn : Dsn, parseEnumValue, parseFlag, parseIoMode, parseSeconds;
 import dbwire.io.backend : IoMode;
 import dbwire.io.transport : TransportFactory;
 import dbwire.tls.transport : TlsOptions;
@@ -242,7 +242,8 @@ struct ConnectionOptions
     `trust_server_certificate`, `host_name_in_certificate`, `tls_ca_file`,
     `tls_cert_file`, `tls_key_file`, `connect_timeout`, `send_timeout`,
     `receive_timeout` (seconds, may be fractional), `packet_size`,
-    `io` (`auto`, `phobos`, `vibe`), `host_selection` (`in_order`, `random`).
+    `io_mode` or `io` (`auto`, `phobos`, `vibe`; URL-style strings only: the ADO
+    form has no I/O mode key), `host_selection` (`in_order`, `random`).
     `pool_*` keys are for the pool and ignored here.
 
     Throws: `ClientException` for an unknown key or an invalid value.
@@ -252,6 +253,7 @@ struct ConnectionOptions
         import std.algorithm.searching : startsWith;
         import std.conv : ConvException, to;
 
+        checkIoModeKeys(params);
         ConnectionOptions options;
         foreach (key, value; params)
         {
@@ -324,8 +326,9 @@ struct ConnectionOptions
                 if (options.packetSize < minPacketSize || options.packetSize > maxPacketSize)
                     throw new ClientException("'packet_size' must be from 512 to 32767");
                 break;
+            case "io_mode":
             case "io":
-                options.ioMode = value == "auto" ? IoMode.auto_ : parseEnumValue!IoMode(key, value);
+                options.ioMode = parseIoMode(key, value);
                 break;
             case "host_selection":
                 options.hostSelection = value == "in_order" ? HostSelection.inOrder
@@ -729,4 +732,28 @@ private bool isPasswordKey(string key) @safe pure
         const e = collectException!ClientException(ConnectionOptions.parse(s));
         assert(e !is null && e.msg.indexOf("cdsecret") < 0, e is null ? s : e.msg);
     }
+}
+
+// The I/O mode: `io_mode`, or `io` for short, as in every connector (buggins/dbwire#83)
+@safe unittest
+{
+    import std.exception : collectExceptionMsg;
+
+    assert(ConnectionOptions.fromDsn("sqlserver://h?io_mode=vibe").ioMode == IoMode.vibe);
+    assert(ConnectionOptions.fromDsn("sqlserver://h?io=vibe").ioMode == IoMode.vibe);
+    assert(ConnectionOptions.fromDsn("sqlserver://h?io=phobos&io_mode=phobos").ioMode == IoMode.phobos);
+    auto message = collectExceptionMsg(ConnectionOptions.fromDsn("sqlserver://h?io=vibe&io_mode=phobos"));
+    assert(message == "'io' and 'io_mode' give different I/O modes ('vibe' and 'phobos')", message);
+    message = collectExceptionMsg(ConnectionOptions.fromDsn("sqlserver://h?io=fibers"));
+    assert(message == "Invalid value 'fibers' for 'io' (auto, phobos or vibe expected)", message);
+}
+
+// `io` is the short form of `io_mode` (buggins/dbwire#83); different values for both are an error,
+// rather than the associative array's order deciding
+private void checkIoModeKeys(const string[string] params) @safe
+{
+    const io = "io" in params;
+    const ioMode = "io_mode" in params;
+    if (io !is null && ioMode !is null && *io != *ioMode)
+        throw new ClientException("'io' and 'io_mode' give different I/O modes ('" ~ *io ~ "' and '" ~ *ioMode ~ "')");
 }
