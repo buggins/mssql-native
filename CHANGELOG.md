@@ -6,6 +6,11 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+## 0.3.2 — 2026-11-18
+
+URL-style connection strings take the I/O mode option as `io_mode` too, its
+main name in all connectors; dbwire 0.9.8.
+
 ### Added
 
 - URL-style connection strings take the I/O mode option as `io_mode` too, its
