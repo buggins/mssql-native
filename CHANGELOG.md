@@ -6,6 +6,11 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+## 0.3.3 — 2026-11-23
+
+`io` and `io_mode` given together: the modes are compared, not the text, with
+dbwire's shared check; dbwire 0.9.9.
+
 ### Fixed
 
 - `io` and `io_mode` given together: the modes are compared, not the text, so
