@@ -18,7 +18,7 @@ module mssql.settings;
 
 import core.time : Duration, seconds;
 
-import dbwire.client.dsn : Dsn, parseEnumValue, parseFlag, parseIoMode, parseSeconds;
+import dbwire.client.dsn : checkIoModeKeys, Dsn, parseEnumValue, parseFlag, parseIoMode, parseSeconds;
 import dbwire.io.backend : IoMode;
 import dbwire.io.transport : TransportFactory;
 import dbwire.tls.transport : TlsOptions;
@@ -139,7 +139,7 @@ struct ConnectionOptions
     brackets. Parameters are those of `fromParams`.
 
     Throws: `ClientException` if the string is malformed or a parameter is
-    unknown or invalid.
+    unknown or invalid, or if `io` and `io_mode` give different modes.
     +/
     static ConnectionOptions fromDsn(string dsn) @safe
     {
@@ -242,11 +242,13 @@ struct ConnectionOptions
     `trust_server_certificate`, `host_name_in_certificate`, `tls_ca_file`,
     `tls_cert_file`, `tls_key_file`, `connect_timeout`, `send_timeout`,
     `receive_timeout` (seconds, may be fractional), `packet_size`,
-    `io_mode` or `io` (`auto`, `phobos`, `vibe`; URL-style strings only: the ADO
-    form has no I/O mode key), `host_selection` (`in_order`, `random`).
+    `io_mode` or `io` (`auto`, `phobos`, `vibe`; both keys may be given only with
+    the same mode; URL-style strings only: the ADO form has no I/O mode key),
+    `host_selection` (`in_order`, `random`).
     `pool_*` keys are for the pool and ignored here.
 
-    Throws: `ClientException` for an unknown key or an invalid value.
+    Throws: `ClientException` for an unknown key or an invalid value, or if `io`
+    and `io_mode` give different modes.
     +/
     static ConnectionOptions fromParams(const string[string] params) @safe
     {
@@ -737,7 +739,7 @@ private bool isPasswordKey(string key) @safe pure
 // The I/O mode: `io_mode`, or `io` for short, as in every connector (buggins/dbwire#83)
 @safe unittest
 {
-    import std.exception : collectExceptionMsg;
+    import std.exception : assertNotThrown, collectExceptionMsg;
 
     assert(ConnectionOptions.fromDsn("sqlserver://h?io_mode=vibe").ioMode == IoMode.vibe);
     assert(ConnectionOptions.fromDsn("sqlserver://h?io=vibe").ioMode == IoMode.vibe);
@@ -746,14 +748,12 @@ private bool isPasswordKey(string key) @safe pure
     assert(message == "'io' and 'io_mode' give different I/O modes ('vibe' and 'phobos')", message);
     message = collectExceptionMsg(ConnectionOptions.fromDsn("sqlserver://h?io=fibers"));
     assert(message == "Invalid value 'fibers' for 'io' (auto, phobos or vibe expected)", message);
-}
-
-// `io` is the short form of `io_mode` (buggins/dbwire#83); different values for both are an error,
-// rather than the associative array's order deciding
-private void checkIoModeKeys(const string[string] params) @safe
-{
-    const io = "io" in params;
-    const ioMode = "io_mode" in params;
-    if (io !is null && ioMode !is null && *io != *ioMode)
-        throw new ClientException("'io' and 'io_mode' give different I/O modes ('" ~ *io ~ "' and '" ~ *ioMode ~ "')");
+    // the modes are compared, not the text (#64): auto and auto_ are the same mode
+    assertNotThrown(ConnectionOptions.fromDsn("sqlserver://h?io=auto&io_mode=auto_"));
+    assert(ConnectionOptions.fromDsn("sqlserver://h?io=vibe&io_mode=vibe").ioMode == IoMode.vibe);
+    // an invalid value is reported as such, not as a conflict
+    message = collectExceptionMsg(ConnectionOptions.fromDsn("sqlserver://h?io=fibers&io_mode=phobos"));
+    assert(message == "Invalid value 'fibers' for 'io' (auto, phobos or vibe expected)", message);
+    message = collectExceptionMsg(ConnectionOptions.fromDsn("sqlserver://h?io=vibe&io_mode=threads"));
+    assert(message == "Invalid value 'threads' for 'io_mode' (auto, phobos or vibe expected)", message);
 }

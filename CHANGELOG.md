@@ -6,6 +6,14 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- `io` and `io_mode` given together: the modes are compared, not the text, so
+  `io=auto&io_mode=auto_` is accepted, and an invalid value is reported as such
+  (`io=fibers&io_mode=phobos`: "Invalid value 'fibers' for 'io'"), not as a
+  conflict. The check is dbwire's `checkIoModeKeys` (buggins/dbwire#95), shared
+  by all connectors (#64). Requires dbwire 0.9.9.
+
 ## 0.3.2 — 2026-11-18
 
 URL-style connection strings take the I/O mode option as `io_mode` too, its
