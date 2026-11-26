@@ -6,6 +6,11 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+## 0.4.0 — 2026-11-26
+
+A command timeout that cancels the statement and keeps the connection, lost
+sessions reported and closed, `inTransaction` after a close; dbwire 0.9.10.
+
 ### Added
 
 - `command_timeout` (`ConnectionOptions.commandTimeout`): how long a
