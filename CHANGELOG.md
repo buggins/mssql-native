@@ -6,6 +6,45 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+### Added
+
+- `command_timeout` (`ConnectionOptions.commandTimeout`): how long a
+  statement may wait for the server's data, summed over its reads as in
+  ADO.NET. When it runs out, the statement is cancelled with an attention
+  request and `StatementTimeoutException` (a `ClientException`) is thrown;
+  the connection stays usable, and an open transaction stays open unless
+  `XACT_ABORT` is on. A statement that ended before the server saw the
+  cancel keeps its result. If the server doesn't acknowledge the cancel
+  within 5 seconds, the connection is closed (#68).
+- `QueryResult.cancelled` is also true after a `StatementTimeoutException`
+  (#68).
+- `ServerException.sessionLost`: whether an error of severity 20 or higher
+  ended the session, e.g. 596 for a statement running when its session was
+  killed; the connection is closed then (#68).
+
+### Changed
+
+- A fatal error (severity 20 or more) that comes with a cancel's
+  acknowledgement is thrown as a `ServerException` (`sessionLost`) and
+  closes the connection; it was dropped, and the connection looked usable.
+  `exec` after a cancel then throws it instead of the `ClientException`
+  "The batch was cancelled" (#68).
+- With `command_timeout` set, the acknowledgement of a `cancel()` is also
+  awaited for at most 5 seconds once the timeout has run out; then the
+  connection is closed (#68).
+- Requires dbwire `~>0.9.10`, whose TLS transport sees data already
+  received (buggins/dbwire#103): the cancel acknowledgement could be missed
+  over full TLS.
+- The ADO keyword `Command Timeout` sets `command_timeout`, as in ADO.NET.
+  It set `receive_timeout`, which closes the connection when it expires
+  (#68).
+
+### Fixed
+
+- `inTransaction` is false after the connection closed, for example after a
+  KILL found on an idle connection; it kept reporting the transaction the
+  server rolled back (#68).
+
 ## 0.3.3 — 2026-11-23
 
 `io` and `io_mode` given together: the modes are compared, not the text, with

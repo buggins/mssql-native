@@ -64,7 +64,8 @@ Features:
   (`Server=...;Database=...`), failover over several hosts;
 - queries with `?` parameters (sent with `sp_executesql`), prepared statements,
   stored procedures with output parameters and return status, multiple result
-  sets and row counts, cancellation (also from another thread or task),
+  sets and row counts, cancellation (also from another thread or task), a
+  statement timeout that cancels and keeps the connection (`command_timeout`),
   transactions with isolation levels and savepoints;
 - the types, read and sent exactly: integers, `bit`, `real`/`float`,
   `decimal`/`numeric`/`money` (as dbwire `Decimal`), `char`/`varchar` (in the

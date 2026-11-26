@@ -254,6 +254,69 @@ void testReceiveTimeout()
     enforce(e !is null && !conn.isOpen, "no timeout, or the connection stayed open");
 }
 
+/// A command timeout cancels the statement (attention) and keeps the connection and its transaction (#68).
+void testCommandTimeout()
+{
+    import core.time : MonoTime, seconds;
+
+    auto conn = connectToServer("command_timeout=1");
+    scope (exit)
+        conn.close();
+    enforce(scalar(conn, "SELECT 1") == "1", "a quick query");
+    const start = MonoTime.currTime;
+    auto e = collectException!StatementTimeoutException(conn.exec("WAITFOR DELAY '00:00:05'"));
+    enforce(e !is null, "no timeout");
+    enforce(MonoTime.currTime - start < 4.seconds, "the timeout took too long");
+    enforce(conn.isOpen && !conn.isBusy && scalar(conn, "SELECT 2") == "2", "unusable after the timeout");
+
+    conn.exec("CREATE TABLE #timeout_test (id int)");
+    conn.begin();
+    conn.exec("INSERT INTO #timeout_test VALUES (1)");
+    enforce(collectException!StatementTimeoutException(conn.exec("WAITFOR DELAY '00:00:05'")) !is null,
+            "no timeout in the transaction");
+    enforce(conn.inTransaction && scalar(conn, "SELECT COUNT(*) FROM #timeout_test") == "1",
+            "the timeout ended the transaction");
+    conn.rollback();
+    enforce(scalar(conn, "SELECT COUNT(*) FROM #timeout_test") == "0", "rollback after the timeout");
+
+    // query(): the timeout comes while the result waits for its first row
+    auto q = collectException!StatementTimeoutException(conn.query("WAITFOR DELAY '00:00:05'; SELECT 1").empty);
+    enforce(q !is null && !conn.isBusy && scalar(conn, "SELECT 3") == "3", "query timeout");
+}
+
+/// A session killed while it runs a statement: error 596 (`sessionLost`), the connection is closed and no longer
+/// reports a transaction (#68).
+void testKilledWhileRunning()
+{
+    import core.thread : Thread;
+    import core.time : msecs;
+
+    auto victim = connectToServer();
+    scope (exit)
+        victim.close();
+    const spid = scalar(victim, "SELECT @@SPID");
+    victim.begin();
+    void kill()
+    {
+        // a connection of the thread's own (thread mode): a fiber-mode connection can't be used from here
+        auto killer = connectToServer();
+        scope (exit)
+            killer.close();
+        Thread.sleep(500.msecs);
+        killer.exec("KILL " ~ spid);
+    }
+
+    auto t = new Thread(&kill);
+    t.start();
+    auto e = collectException!DbException(victim.exec("WAITFOR DELAY '00:00:10'"));
+    t.join();
+    enforce(e !is null, "no error after the kill");
+    auto se = cast(ServerException) e;
+    enforce((se !is null && se.sessionLost) || cast(ConnectionException) e !is null,
+            "not a lost session: " ~ typeid(e).name ~ ": " ~ e.msg);
+    enforce(!victim.isOpen && !victim.inTransaction, "the killed session stays open or in a transaction");
+}
+
 private string splitFirst(string version_)
 {
     import std.string : indexOf;

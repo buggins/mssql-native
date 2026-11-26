@@ -91,6 +91,19 @@ struct ConnectionOptions
     this limits the query time.
     +/
     Duration receiveTimeout;
+    /++
+    Maximum time a request (a statement or batch) may wait for the server's
+    data, summed over its reads, as ADO.NET counts it: the time the caller
+    spends between reading rows doesn't count. `Duration.zero` (the default):
+    no limit. When it runs out, the statement is cancelled (an attention
+    request) and `StatementTimeoutException` is thrown; the connection stays
+    usable. If the statement had ended before the server saw the cancel, its
+    result counts and no exception is thrown. If the server doesn't
+    acknowledge the cancel within 5 seconds, the connection is closed
+    (`ConnectionException`). Unlike `receiveTimeout`, which closes the
+    connection, this is what ADO.NET's `Command Timeout` does (#68).
+    +/
+    Duration commandTimeout;
 
     /// Requested packet size (512 to 32767); the server may answer with another one.
     uint packetSize = defaultPacketSize;
@@ -183,7 +196,7 @@ struct ConnectionOptions
     $(TR $(TD `Workstation ID`, `WSID`) $(TD the client's name))
     $(TR $(TD `Current Language`, `Language`) $(TD the session language))
     $(TR $(TD `Connect Timeout`, `Connection Timeout`, `Timeout`) $(TD seconds))
-    $(TR $(TD `Command Timeout`) $(TD the receive timeout, seconds; 0: none))
+    $(TR $(TD `Command Timeout`) $(TD `command_timeout`, seconds; 0: none))
     $(TR $(TD `Packet Size`) $(TD bytes, 512 to 32767))
     $(TR $(TD `ApplicationIntent`) $(TD `ReadOnly` or `ReadWrite`))
     $(TR $(TD `Max Pool Size`, `Connection Lifetime`) $(TD for `ConnectionPool`))
@@ -241,7 +254,7 @@ struct ConnectionOptions
     `workstation`, `language`, `read_only` (true/false), `encrypt` (true/false),
     `trust_server_certificate`, `host_name_in_certificate`, `tls_ca_file`,
     `tls_cert_file`, `tls_key_file`, `connect_timeout`, `send_timeout`,
-    `receive_timeout` (seconds, may be fractional), `packet_size`,
+    `receive_timeout`, `command_timeout` (seconds, may be fractional), `packet_size`,
     `io_mode` or `io` (`auto`, `phobos`, `vibe`; both keys may be given only with
     the same mode; URL-style strings only: the ADO form has no I/O mode key),
     `host_selection` (`in_order`, `random`).
@@ -323,6 +336,9 @@ struct ConnectionOptions
             case "receive_timeout":
                 options.receiveTimeout = parseSeconds(key, value);
                 break;
+            case "command_timeout":
+                options.commandTimeout = parseSeconds(key, value);
+                break;
             case "packet_size":
                 options.packetSize = parse!uint;
                 if (options.packetSize < minPacketSize || options.packetSize > maxPacketSize)
@@ -364,6 +380,8 @@ struct ConnectionOptions
             ~ "&io=phobos&host_selection=random&read_only=1&host_name_in_certificate=db.example&pool_max=3");
     assert(o.hosts == [HostPort("::1", 14_330)] && !o.encrypt && o.connectTimeout == 2500.msecs);
     assert(ConnectionOptions.fromDsn("sqlserver://h/?connect_timeout=0").connectTimeout == Duration.zero);
+    const t = ConnectionOptions.fromDsn("sqlserver://h/?command_timeout=1.5");
+    assert(t.commandTimeout == 1500.msecs && t.receiveTimeout == Duration.zero);
     assert(o.packetSize == 8000 && o.ioMode == IoMode.phobos && o.hostSelection == HostSelection.random);
     assert(o.readOnlyIntent && o.tls.serverName == "db.example");
 
@@ -498,7 +516,7 @@ AdoConnectionString parseAdoString(string connectionString) @safe pure
             result.params["connect_timeout"] = value;
             break;
         case "command timeout":
-            result.params["receive_timeout"] = value;
+            result.params["command_timeout"] = value;
             break;
         case "packet size":
             result.params["packet_size"] = value;
@@ -572,6 +590,8 @@ AdoConnectionString parseAdoString(string connectionString) @safe pure
     assertThrown!ClientException(parseAdoString("Server=db;Integrated Security=SSPI"));
     assertThrown!ClientException(parseAdoString("Server=db;Colour=blue"));
     assert(parseAdoString("Server=db;Integrated Security=false").hosts == [HostPort("db")]);
+    // Command Timeout is the statement timeout, not the receive timeout (#68)
+    assert(parseAdoString("Server=db;Command Timeout=7").params["command_timeout"] == "7");
 }
 
 /// The `key=value` pairs of an ADO-style connection string, unquoted.
