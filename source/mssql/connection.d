@@ -21,7 +21,8 @@ module mssql.connection;
 import dbwire.client.hosts : connectFirst, orderHosts;
 import dbwire.client.pool : Poolable;
 import core.thread : Thread;
-import dbwire.io.backend : IoBackend, IoLock, backendFor;
+import core.time : Duration, MonoTime;
+import dbwire.io.backend : IoBackend, IoLock, backendFor, waitForData;
 import dbwire.io.buffer : BufferedReader;
 import dbwire.io.transport : Transport;
 import dbwire.tls.transport : TlsContext, TlsOptions, TlsTransport, TlsVersion;
@@ -76,7 +77,14 @@ final class Connection : Poolable
     private bool statusWanted; // the request calls a user's procedure (not sp_executesql, sp_execute, ...)
     private shared bool attentionPending; // a cancel was sent and not yet acknowledged
     private bool resetPending; // the next request resets the session
-    private bool lastCancelled; // the last response ended with an attention acknowledgement
+    package bool lastCancelled; // the last response was cancelled (its rows or counts are incomplete)
+    private bool timedOut; // the current request ran into the command timeout: its attention was sent
+    private bool timeoutSpent; // the command timeout no longer applies to the current request (a cancel came first)
+    private bool responseCompleted; // the response's final DONE came before the attention acknowledgement
+    private Duration timeoutLeft; // what is left of the command timeout for the current request
+    private bool awaitingAck; // the command timeout ran out with an attention pending: its acknowledgement is due
+    private Duration ackLeft; // then: what is left of the 5 seconds for the rest of the response
+    private size_t errorsAtAttention; // the errors collected when the timeout's attention went out
     private HostPort connectedHost;
     private LoginAck ack;
     private string currentDatabase;
@@ -186,7 +194,7 @@ final class Connection : Poolable
     /// Whether the session is inside a transaction.
     @property bool inTransaction() const @safe pure nothrow
     {
-        return transactionDescriptor != 0;
+        return state != State.closed && transactionDescriptor != 0; // (closed from another thread: not cleared)
     }
 
     /++
@@ -252,10 +260,7 @@ final class Connection : Poolable
                     if (done.hasCount && done.command != selectCommand && done.token != TokenType.doneProc)
                         affected += done.rowCount;
                     if (finishIfFinal(done))
-                    {
-                        lastCancelled = done.attention;
                         return;
-                    }
                     break;
                 }
             }
@@ -601,22 +606,28 @@ final class Connection : Poolable
     +/
     void cancel() @safe nothrow
     {
+        sendAttention();
+    }
+
+    /// Sends (or defers) an attention request; returns whether this call did (not: nothing to cancel, or already cancelled).
+    private bool sendAttention() @safe nothrow
+    {
         import core.atomic : atomicLoad, atomicStore;
 
         if (writeLock is null || !onOwnerThread)
-            return; // a fiber-mode connection's socket belongs to its thread's event loop
+            return false; // a fiber-mode connection's socket belongs to its thread's event loop
         try
         {
             writeLock.lock();
             scope (exit)
                 writeLock.unlock();
             if (state != State.busy || requestNumber == 0 || atomicLoad(attentionPending))
-                return; // nothing running (or still connecting), or already cancelled
+                return false; // nothing running (or still connecting), or already cancelled
             atomicStore(attentionPending, true);
             if (!requestSent)
             {
                 attentionDeferred = true; // sent right after the request's last packet
-                return;
+                return true;
             }
             try
                 transport.write(attentionPacket[]);
@@ -624,12 +635,68 @@ final class Connection : Poolable
             {
                 atomicStore(attentionPending, false);
                 transport.close(); // part of it may be out: the reading side sees a broken connection
+                return false;
             }
+            return true;
         }
         catch (Exception)
         {
-            // the lock failed: nothing was sent
+            return false; // the lock failed: nothing was sent
         }
+    }
+
+    /++
+    Before each read of the server's data: with a command timeout, while a
+    request runs, waits for data within what is left of it. As in ADO.NET, the
+    timeout is the sum of these waits for one request, not the time spent
+    between reads. When it runs out, cancels the request (an attention request;
+    `finishIfFinal` then throws `StatementTimeoutException`, unless the
+    statement had ended already) and gives the rest of the response 5 seconds
+    of waits; if it doesn't come, the connection is lost (#68). A cancel
+    already sent through `cancel()` keeps its own handling (no timeout is
+    reported), but its acknowledgement gets the same 5 seconds.
+    +/
+    private void awaitResponseData() @safe
+    {
+        import core.atomic : atomicLoad;
+        import core.time : seconds;
+
+        if (options.commandTimeout <= Duration.zero || state != State.busy || !requestSent || timeoutSpent)
+            return;
+        if (!awaitingAck)
+        {
+            if (waitWithin(timeoutLeft))
+                return;
+            if (sendAttention())
+            {
+                timedOut = true;
+                errorsAtAttention = errors.length;
+            }
+            else if (!atomicLoad(attentionPending))
+            {
+                timeoutSpent = true; // the attention couldn't be written: the transport is closed, the read fails
+                return;
+            }
+            awaitingAck = true;
+            ackLeft = 5.seconds;
+        }
+        if (!waitWithin(ackLeft))
+        {
+            enum noAnswer = "the server didn't answer the cancel within 5 seconds";
+            throw new ConnectionException(timedOut ? "The statement ran into the command timeout, and " ~ noAnswer
+                    : "The command timeout ran out after a cancel, and " ~ noAnswer);
+        }
+    }
+
+    /// Waits for the server's data within `budget`; subtracts the time waited from it.
+    private bool waitWithin(ref Duration budget) @safe
+    {
+        if (budget <= Duration.zero)
+            return packets.transport.dataAvailable();
+        const start = MonoTime.currTime;
+        scope (exit)
+            budget -= MonoTime.currTime - start;
+        return waitForData(packets.transport, budget, backend);
     }
 
     private static immutable ubyte[packetHeaderSize] attentionPacket = [
@@ -733,6 +800,7 @@ final class Connection : Poolable
             transportLeftOpen = transport !is null; // the socket belongs to another thread's event loop
             return;
         }
+        transactionDescriptor = 0; // the server rolls back what a closed session left open (#68)
         if (transport !is null)
             transport.close();
     }
@@ -775,7 +843,7 @@ final class Connection : Poolable
                 // a batch that keeps failing (a loop hitting a constraint) sends errors until it ends: the first
                 // ones are kept, and the fatal ones (severity 20 and up: the server closes the connection)
                 const message = readMessage(reader);
-                if (errors.length < maxErrors || message.severity >= 20)
+                if (errors.length < maxErrors || message.severity >= fatalSeverity)
                     errors ~= message;
                 break;
             case TokenType.info:
@@ -841,8 +909,18 @@ final class Connection : Poolable
                 atomicStore(attentionPending, false);
                 state = State.ready;
             }
+            const wasTimeout = timedOut;
+            timedOut = false;
+            if (wasTimeout && responseCompleted)
+                return finishResponse(); // the statement ran to its end before the timeout's cancel: no timeout
+            lastCancelled = true;
+            if (endsSession(errors))
+                return finishResponse(); // the session is lost: report that, and close
             errors = null;
             messageError = null;
+            if (wasTimeout)
+                throw new StatementTimeoutException("The statement was cancelled: no data from the server within the "
+                        ~ "command timeout (" ~ options.commandTimeout.toString() ~ ")");
             return true;
         }
         if (done.more || done.token == TokenType.doneInProc)
@@ -860,18 +938,26 @@ final class Connection : Poolable
         }
         if (pending)
         {
-            // the response ended before the server saw the cancel: the acknowledgement follows in a message of its own
+            // the response ended before the server saw the cancel, or the cancel stopped the batch (a DONE with the
+            // error bit and no error of its own, as SQL Server sends it): the acknowledgement follows in a message of
+            // its own
+            responseCompleted = !done.failed || errors.length > errorsAtAttention;
             packets.beginMessage();
             return false;
         }
+        return finishResponse();
+    }
+
+    /// At the end of a response: throws its collected errors (closing the connection after fatal ones); returns true.
+    private bool finishResponse() @safe
+    {
         if (errors.length)
         {
             auto e = errors;
             errors = null;
             messageError = null;
-            foreach (m; e)
-                if (m.severity >= 20)
-                    close(); // the server closes the connection after fatal errors
+            if (endsSession(e))
+                close(); // the server closes the connection after fatal errors
             throw new ServerException(e);
         }
         if (messageError !is null)
@@ -1101,6 +1187,13 @@ final class Connection : Poolable
                 writeLock.unlock();
             state = State.busy;
             requestSent = false;
+            timedOut = false;
+            timeoutSpent = false;
+            awaitingAck = false;
+            errorsAtAttention = 0;
+            responseCompleted = false;
+            lastCancelled = false;
+            timeoutLeft = options.commandTimeout;
             requestNumber++;
         }
     }
@@ -1250,6 +1343,7 @@ final class Connection : Poolable
         raw.setTimeouts(options.connectTimeout, options.connectTimeout);
         writer = new PacketWriter(raw);
         packets = new PacketReader(raw);
+        packets.beforeRead = &awaitResponseData;
         reader = new BufferedReader(packets);
 
         // PRELOGIN: agree on encryption
@@ -1401,7 +1495,6 @@ private string machineName() @safe nothrow
 
 version (unittest)
 {
-    import core.time : Duration;
     import dbwire.io.mock : MockTransport;
 
     /// Packs a server message as one tabular result packet.
@@ -1598,6 +1691,178 @@ version (unittest)
     assert(server.written[$ - 8 .. $] == [PacketType.attention, 0x01, 0, 8, 0, 0, 1, 0]);
     auto r = new QueryResult(conn);
     assert(r.empty && r.cancelled && !conn.isBusy && r.counts.length == 1);
+}
+
+@safe unittest
+{
+    // the command timeout (#68): no data in time cancels the request (attention), the acknowledgement ends it with
+    // StatementTimeoutException, and the connection stays usable; without an acknowledgement it is lost
+    import core.time : msecs;
+    import dbwire.io.transport : WaitableTransport;
+    import std.exception : assertThrown, collectException;
+    import std.traits : EnumMembers;
+
+    static ubyte[] done(ushort status, ushort command, ulong rows) @safe pure
+    {
+        ubyte[] b = [
+            0xFD, cast(ubyte) status, cast(ubyte)(status >> 8), cast(ubyte) command,
+            cast(ubyte)(command >> 8)
+        ];
+        foreach (i; 0 .. 8)
+            b ~= cast(ubyte)(rows >> (8 * i));
+        return b;
+    }
+
+    static ubyte[] fatalError() @safe
+    {
+        import dbwire.charset.utf16 : encodeUtf16le;
+
+        const text = encodeUtf16le("Cannot continue the execution because the session is in the kill state.");
+        ubyte[] body = [0x54, 0x02, 0, 0, 1, 21, cast(ubyte)(text.length / 2), 0]; // Msg 596, state 1, level 21
+        body ~= text;
+        body ~= [0, 0, 1, 0, 0, 0];
+        return [ubyte(0xAA), cast(ubyte)
+            body.length, ubyte(0)] ~ body;
+    }
+
+    enum Mode
+    {
+        acknowledges, // stops the batch and acknowledges the attention
+        silent, // never answers
+        finishedFirst, // the statement's final DONE comes before the acknowledgement
+        userCancel, // the user cancels before the timeout runs out
+        userCancelUnanswered, // the same, and the server never acknowledges
+        fatal, // a fatal error comes with the acknowledgement
+    }
+
+    // a server that is silent until it gets an attention request, which it answers as `mode` says
+    static final class SilentServer : Transport, WaitableTransport
+    {
+        MockTransport mock;
+        Mode mode;
+        void delegate() @safe userCancel; // Mode.userCancel: called on the first wait
+        this() @safe
+        {
+            mock = new MockTransport;
+        }
+
+        override size_t read(scope ubyte[] buffer) @safe
+        {
+            return mock.read(buffer);
+        }
+
+        override void write(scope const(ubyte)[] data) @safe
+        {
+            mock.write(data);
+            if (!data.length || data[0] != PacketType.attention)
+                return;
+            final switch (mode)
+            {
+            case Mode.acknowledges:
+                // as SQL Server answers: the stopped batch's final DONE (error bit), then the acknowledgement
+                mock.feed(serverMessage(done(0x02, 0, 0)));
+                mock.feed(serverMessage(done(0x20, 0, 0)));
+                break;
+            case Mode.userCancel:
+                mock.feed(serverMessage(done(0x20, 0, 0)));
+                break;
+            case Mode.silent:
+            case Mode.userCancelUnanswered:
+                break;
+            case Mode.finishedFirst:
+                mock.feed(serverMessage(done(0x10, 0xC3, 1))); // INSERT, 1 row: the response's end
+                mock.feed(serverMessage(done(0x20, 0, 0)));
+                break;
+            case Mode.fatal:
+                mock.feed(serverMessage(fatalError() ~ done(0x20, 0, 0)));
+                break;
+            }
+        }
+
+        override bool dataAvailable() @safe
+        {
+            return mock.dataAvailable();
+        }
+
+        override void close() @safe nothrow
+        {
+            mock.close();
+        }
+
+        override bool connected() const @safe nothrow
+        {
+            return mock.connected;
+        }
+
+        override void setTimeouts(Duration receive, Duration send) @safe
+        {
+        }
+
+        @property bool canWaitForData() @safe
+        {
+            return true;
+        }
+
+        bool waitForData(Duration timeout) @safe
+        {
+            cast(void) timeout; // nothing arrives while waiting
+            if (userCancel !is null)
+            {
+                auto cancel = userCancel;
+                userCancel = null;
+                cancel(); // acknowledged at once; this wait still runs out
+                return false;
+            }
+            return mock.dataAvailable();
+        }
+    }
+
+    foreach (mode; [EnumMembers!Mode])
+    {
+        auto server = new SilentServer;
+        server.mode = mode;
+        server.mock.feed(serverMessage(preloginNoTls));
+        server.mock.feed(serverMessage(capturedLogin));
+        ConnectionOptions options;
+        options.user = "sa";
+        options.encrypt = false;
+        options.commandTimeout = 1.msecs;
+        Transport factory(string, ushort, Duration)
+        {
+            return server;
+        }
+
+        options.transportFactory = &factory;
+        auto conn = new Connection(options);
+        if (mode == Mode.userCancel || mode == Mode.userCancelUnanswered)
+            server.userCancel = &conn.cancel;
+        final switch (mode)
+        {
+        case Mode.acknowledges:
+            assertThrown!StatementTimeoutException(conn.exec("WAITFOR DELAY '00:01:00'"));
+            break;
+        case Mode.silent:
+        case Mode.userCancelUnanswered: // the acknowledgement of a user's cancel is bounded too
+            assertThrown!ConnectionException(conn.exec("WAITFOR DELAY '00:01:00'"));
+            assert(!conn.isOpen);
+            continue;
+        case Mode.finishedFirst:
+            assert(conn.exec("INSERT INTO t VALUES (1)") == 1); // the insert ran: no timeout
+            break;
+        case Mode.userCancel:
+            const e = collectException!ClientException(conn.exec("WAITFOR DELAY '00:01:00'"));
+            assert(e !is null && cast(const(StatementTimeoutException)) e is null, "a user's cancel isn't a timeout");
+            break;
+        case Mode.fatal:
+            const e = collectException!ServerException(conn.exec("WAITFOR DELAY '00:01:00'"));
+            assert(e !is null && e.sessionLost && !conn.isOpen);
+            continue;
+        }
+        assert(server.mock.written[$ - 8 .. $] == [PacketType.attention, 0x01, 0, 8, 0, 0, 1, 0]);
+        assert(conn.isOpen && !conn.isBusy);
+        server.mock.feed(serverMessage(done(0x10, 0xC1, 1))); // the next statement's response
+        conn.exec("SELECT 1");
+    }
 }
 
 // --- robustness (#40), against replayed responses ---

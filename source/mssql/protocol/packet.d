@@ -195,6 +195,8 @@ final class PacketReader : Transport
 {
     /// The transport the packets come from.
     Transport transport;
+    /// Called before each read from `transport`, e.g. to wait for data with a timeout; may be null.
+    void delegate() @safe beforeRead;
     private size_t remaining; // data bytes left in the current packet
     private bool lastPacket; // the current packet ends the message
     private bool started;
@@ -235,6 +237,8 @@ final class PacketReader : Transport
             readHeader();
         }
         const want = buffer.length < remaining ? buffer.length : remaining;
+        if (beforeRead !is null)
+            beforeRead();
         const n = transport.read(buffer[0 .. want]);
         if (n == 0)
             throw new ConnectionException("Connection closed by the server");
@@ -274,6 +278,8 @@ final class PacketReader : Transport
         size_t got;
         while (got < header.length)
         {
+            if (beforeRead !is null)
+                beforeRead();
             const n = transport.read(header[got .. $]);
             if (n == 0)
                 throw new ConnectionException("Connection closed by the server");

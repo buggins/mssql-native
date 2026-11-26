@@ -8,7 +8,7 @@ module mssql.result;
 
 import std.conv : to;
 import mssql.connection : Connection;
-import mssql.exception : ClientException;
+import mssql.exception : ClientException, ServerException, StatementTimeoutException;
 import mssql.protocol.tokens : Done, TokenType;
 import mssql.types.typeinfo : ColumnInfo, ValueRef, readColumnMetadata;
 import mssql.protocol.rpc : OutputParameter;
@@ -368,7 +368,8 @@ final class QueryResult
     Stops the batch on the server (an attention request) and discards the rest
     of the response; then the connection is ready. Statements that already ran
     keep their effects (unless a transaction is rolled back). Errors of the
-    batch are not reported.
+    batch, and a command timeout that cancelled it first, are not reported;
+    after an error that ended the session the connection is closed.
     +/
     void cancel() @safe
     {
@@ -380,7 +381,16 @@ final class QueryResult
         if (finished)
             return;
         conn.cancel();
-        conn.guarded({ advance(); });
+        try
+            conn.guarded({ advance(); });
+        catch (StatementTimeoutException)
+        {
+            // the command timeout had cancelled the batch already
+        }
+        catch (ServerException)
+        {
+            // errors of the batch aren't reported (one that ended the session closed the connection: isOpen)
+        }
     }
 
     /++
@@ -484,6 +494,7 @@ final class QueryResult
             catch (Exception e)
             {
                 finished = true;
+                wasCancelled = conn.lastCancelled; // a StatementTimeoutException
                 // a ServerException (or onMessage's exception) after the response's end: its outputs still count
                 // (a prepared statement's handle comes back even when its first execution fails)
                 if (conn.isOpen && !conn.isBusy)
@@ -499,7 +510,7 @@ final class QueryResult
             if (final_)
             {
                 finished = true;
-                wasCancelled = done.attention;
+                wasCancelled = conn.lastCancelled;
                 outputList = conn.responseOutputs;
                 hasStatus = conn.responseHasStatus;
                 statusValue = conn.responseStatus;

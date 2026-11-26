@@ -8,6 +8,8 @@ $(UL
     $(LI `ConnectionException`: network failure or timeout. The connection is closed.)
     $(LI `ProtocolException`: malformed or unexpected data from the server. The connection is closed.)
     $(LI `ClientException`: invalid use of the library or an unsupported feature.)
+    $(LI `StatementTimeoutException` (a `ClientException`): a statement ran longer than
+        `ConnectionOptions.commandTimeout` and was cancelled. The connection stays usable.)
 )
 
 Copyright: Copyright © 2026, Vadim Lopatin
@@ -90,6 +92,43 @@ class ServerException : DbException
     {
         return error.severity;
     }
+
+    /++
+    Whether the error ended the session: one of the errors has severity 20 or
+    higher, e.g. 596 for a statement running when its session was killed. The
+    connection is then closed, and an open transaction was rolled back (#68).
+    +/
+    @property bool sessionLost() const @safe pure nothrow @nogc
+    {
+        return endsSession(errors);
+    }
+}
+
+/// Errors of this severity or higher end the session: the server closes the connection.
+package enum ubyte fatalSeverity = 20;
+
+/// Whether one of `errors` ends the session (severity `fatalSeverity` or higher).
+package bool endsSession(const ServerMessage[] errors) @safe pure nothrow @nogc
+{
+    foreach (e; errors)
+        if (e.severity >= fatalSeverity)
+            return true;
+    return false;
+}
+
+/++
+A statement ran longer than `ConnectionOptions.commandTimeout` (no data from
+the server for that long): the client cancelled it with an attention request,
+and the server stopped it. The connection stays usable; an open transaction
+stays open, unless `XACT_ABORT` is on (#68).
++/
+class StatementTimeoutException : ClientException
+{
+    ///
+    this(string msg, string file = __FILE__, size_t line = __LINE__) @safe pure nothrow
+    {
+        super(msg, file, line);
+    }
 }
 
 ///
@@ -98,7 +137,11 @@ class ServerException : DbException
     auto e = new ServerException([
         ServerMessage(102, 1, 15, "Incorrect syntax near 'x'.", "db1", "", 1)
     ]);
-    assert(e.number == 102 && e.severity == 15);
+    assert(e.number == 102 && e.severity == 15 && !e.sessionLost);
+    assert(new ServerException([
+        ServerMessage(596, 1, 21, "Cannot continue the execution because the session is in "
+                ~ "the kill state.", "db1", "", 1)
+    ]).sessionLost);
     assert(e.msg == "Msg 102, Level 15, State 1, Line 1: Incorrect syntax near 'x'.");
     const DbException base = e; // all exceptions share dbwire's base class
     assert(base !is null);
