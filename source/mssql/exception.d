@@ -8,8 +8,8 @@ $(UL
     $(LI `ConnectionException`: network failure or timeout. The connection is closed.)
     $(LI `ProtocolException`: malformed or unexpected data from the server. The connection is closed.)
     $(LI `ClientException`: invalid use of the library or an unsupported feature.)
-    $(LI `StatementTimeoutException` (a `ClientException`): a statement ran longer than
-        `ConnectionOptions.commandTimeout` and was cancelled. The connection stays usable.)
+    $(LI `StatementTimeoutException` (a `ClientException`): a statement ran longer than the command timeout
+        (`Connection.commandTimeout`) and was cancelled. The connection stays usable.)
 )
 
 Copyright: Copyright © 2026, Vadim Lopatin
@@ -117,10 +117,11 @@ package bool endsSession(const ServerMessage[] errors) @safe pure nothrow @nogc
 }
 
 /++
-A statement ran longer than `ConnectionOptions.commandTimeout` (no data from
-the server for that long): the client cancelled it with an attention request,
-and the server stopped it. The connection stays usable; an open transaction
-stays open, unless `XACT_ABORT` is on (#68).
+A statement ran longer than the command timeout it started with
+(`Connection.commandTimeout`, initially `ConnectionOptions.commandTimeout`;
+no data from the server for that long): the client cancelled it with an
+attention request, and the server stopped it. The connection stays usable;
+an open transaction stays open, unless `XACT_ABORT` is on (#68).
 +/
 class StatementTimeoutException : ClientException
 {

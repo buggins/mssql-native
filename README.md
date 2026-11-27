@@ -65,8 +65,9 @@ Features:
 - queries with `?` parameters (sent with `sp_executesql`), prepared statements,
   stored procedures with output parameters and return status, multiple result
   sets and row counts, cancellation (also from another thread or task), a
-  statement timeout that cancels and keeps the connection (`command_timeout`),
-  transactions with isolation levels and savepoints;
+  statement timeout that cancels and keeps the connection (`command_timeout`,
+  or `Connection.commandTimeout` per connection), transactions with isolation
+  levels and savepoints;
 - the types, read and sent exactly: integers, `bit`, `real`/`float`,
   `decimal`/`numeric`/`money` (as dbwire `Decimal`), `char`/`varchar` (in the
   collation's code page, Japanese, Chinese and Korean included) and

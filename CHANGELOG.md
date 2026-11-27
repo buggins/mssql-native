@@ -6,6 +6,14 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+### Added
+
+- `Connection.commandTimeout`: the command timeout can be changed on an open
+  connection; the new value applies from the next request, and a running
+  request keeps the timeout it started with. `resetSession` (the pool, on
+  release and acquire) restores the value of `ConnectionOptions`. For ddbc's
+  `Statement.setQueryTimeout` (#72).
+
 ## 0.4.0 — 2026-11-26
 
 A command timeout that cancels the statement and keeps the connection, lost
