@@ -6,6 +6,18 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- Command timeout: when the attention request can't be sent, the request
+  fails with a `ConnectionException` that names the timeout, and the
+  connection is closed. Before, the next read failed with a generic error,
+  or (when the write lock failed) the request went on with no timeout at all
+  (#76).
+- Command timeout: after the cancel, the connection is closed when 5 seconds
+  pass without data, as in postgresql-native. Before, the rest of the
+  response got 5 seconds in total, so a large response still on its way
+  could get a working connection closed (#77).
+
 ## 0.4.1 — 2026-11-27
 
 The command timeout can be changed on an open connection (#72).

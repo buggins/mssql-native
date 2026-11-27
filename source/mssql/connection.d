@@ -79,13 +79,12 @@ final class Connection : Poolable
     private bool resetPending; // the next request resets the session
     package bool lastCancelled; // the last response was cancelled (its rows or counts are incomplete)
     private bool timedOut; // the current request ran into the command timeout: its attention was sent
-    private bool timeoutSpent; // the command timeout no longer applies to the current request (a cancel came first)
     private bool responseCompleted; // the response's final DONE came before the attention acknowledgement
     private Duration commandTimeoutValue; // `commandTimeout`: for the requests that start from now on
     private Duration requestTimeout; // the command timeout of the current request, taken when it started
     private Duration timeoutLeft; // what is left of the command timeout for the current request
     private bool awaitingAck; // the command timeout ran out with an attention pending: its acknowledgement is due
-    private Duration ackLeft; // then: what is left of the 5 seconds for the rest of the response
+    private Duration ackLeft; // then: what is left of the 5 seconds without data, restarted when data comes
     private size_t errorsAtAttention; // the errors collected when the timeout's attention went out
     private HostPort connectedHost;
     private LoginAck ack;
@@ -629,11 +628,13 @@ final class Connection : Poolable
     +/
     void cancel() @safe nothrow
     {
-        sendAttention();
+        Exception ignored;
+        sendAttention(ignored);
     }
 
-    /// Sends (or defers) an attention request; returns whether this call did (not: nothing to cancel, or already cancelled).
-    private bool sendAttention() @safe nothrow
+    /// Sends (or defers) an attention request; returns whether this call did (not: nothing to cancel, or already
+    /// cancelled, or it couldn't be sent: then `error` is why).
+    private bool sendAttention(out Exception error) @safe nothrow
     {
         import core.atomic : atomicLoad, atomicStore;
 
@@ -654,16 +655,18 @@ final class Connection : Poolable
             }
             try
                 transport.write(attentionPacket[]);
-            catch (Exception)
+            catch (Exception e)
             {
+                error = e;
                 atomicStore(attentionPending, false);
                 transport.close(); // part of it may be out: the reading side sees a broken connection
                 return false;
             }
             return true;
         }
-        catch (Exception)
+        catch (Exception e)
         {
+            error = e;
             return false; // the lock failed: nothing was sent
         }
     }
@@ -674,41 +677,42 @@ final class Connection : Poolable
     timeout is the sum of these waits for one request, not the time spent
     between reads. When it runs out, cancels the request (an attention request;
     `finishIfFinal` then throws `StatementTimeoutException`, unless the
-    statement had ended already) and gives the rest of the response 5 seconds
-    of waits; if it doesn't come, the connection is lost (#68). A cancel
-    already sent through `cancel()` keeps its own handling (no timeout is
-    reported), but its acknowledgement gets the same 5 seconds.
+    statement had ended already); from then on the connection is lost when 5
+    seconds pass without data (#68, #77). A cancel already sent through
+    `cancel()` keeps its own handling (no timeout is reported), but its
+    acknowledgement gets the same rule. When the attention can't be sent, the
+    connection is lost too (#76).
     +/
     private void awaitResponseData() @safe
     {
         import core.atomic : atomicLoad;
         import core.time : seconds;
 
-        if (requestTimeout <= Duration.zero || state != State.busy || !requestSent || timeoutSpent)
+        if (requestTimeout <= Duration.zero || state != State.busy || !requestSent)
             return;
         if (!awaitingAck)
         {
             if (waitWithin(timeoutLeft))
                 return;
-            if (sendAttention())
+            Exception error;
+            if (sendAttention(error))
             {
                 timedOut = true;
                 errorsAtAttention = errors.length;
             }
-            else if (!atomicLoad(attentionPending))
-            {
-                timeoutSpent = true; // the attention couldn't be written: the transport is closed, the read fails
-                return;
-            }
+            else if (!atomicLoad(attentionPending)) // (a user's attention already out: its answer gets the 5 seconds)
+                throw new ConnectionException("The statement ran into the command timeout (" ~ requestTimeout.toString()
+                        ~ "), and the cancel couldn't be sent" ~ (error is null ? "" : ": " ~ error.msg), error);
             awaitingAck = true;
             ackLeft = 5.seconds;
         }
         if (!waitWithin(ackLeft))
         {
-            enum noAnswer = "the server didn't answer the cancel within 5 seconds";
+            enum noAnswer = "the server sent nothing for 5 seconds after the cancel";
             throw new ConnectionException(timedOut ? "The statement ran into the command timeout, and " ~ noAnswer
                     : "The command timeout ran out after a cancel, and " ~ noAnswer);
         }
+        ackLeft = 5.seconds; // data came: the rest of a large response may still be on its way (#77)
     }
 
     /// Waits for the server's data within `budget`; subtracts the time waited from it.
@@ -1213,7 +1217,6 @@ final class Connection : Poolable
             state = State.busy;
             requestSent = false;
             timedOut = false;
-            timeoutSpent = false;
             awaitingAck = false;
             errorsAtAttention = 0;
             responseCompleted = false;
@@ -1759,6 +1762,8 @@ version (unittest)
         userCancel, // the user cancels before the timeout runs out
         userCancelUnanswered, // the same, and the server never acknowledges
         fatal, // a fatal error comes with the acknowledgement
+        attentionFails, // the attention can't be written (#76)
+        trickles, // answers the attention in pieces, a wait apart (#77)
     }
 
     // a server that is silent until it gets an attention request, which it answers as `mode` says
@@ -1767,6 +1772,9 @@ version (unittest)
         MockTransport mock;
         Mode mode;
         void delegate() @safe userCancel; // Mode.userCancel: called on the first wait
+        const(ubyte)[][] pieces; // Mode.trickles: the answer, one piece per wait
+        bool attentionSeen;
+        Duration[] ackWaits; // Mode.trickles: the time each wait after the attention was given
         this() @safe
         {
             mock = new MockTransport;
@@ -1779,6 +1787,8 @@ version (unittest)
 
         override void write(scope const(ubyte)[] data) @safe
         {
+            if (mode == Mode.attentionFails && data.length && data[0] == PacketType.attention)
+                throw new ConnectionException("Connection reset by peer");
             mock.write(data);
             if (!data.length || data[0] != PacketType.attention)
                 return;
@@ -1801,6 +1811,14 @@ version (unittest)
                 break;
             case Mode.fatal:
                 mock.feed(serverMessage(fatalError() ~ done(0x20, 0, 0)));
+                break;
+            case Mode.attentionFails:
+                break; // (thrown above)
+            case Mode.trickles:
+                const answer = serverMessage(done(0x02, 0, 0)) ~ serverMessage(done(0x20, 0, 0));
+                foreach (i; 0 .. 4)
+                    pieces ~= answer[i * answer.length / 4 .. (i + 1) * answer.length / 4];
+                attentionSeen = true;
                 break;
             }
         }
@@ -1831,6 +1849,27 @@ version (unittest)
 
         bool waitForData(Duration timeout) @safe
         {
+            import core.time : msecs;
+
+            static void pause() @safe // until the clock moves on (no sleep: blocking calls go through dbwire)
+            {
+                const start = MonoTime.currTime;
+                while (MonoTime.currTime - start < 1.msecs)
+                {
+                }
+            }
+
+            if (attentionSeen)
+            {
+                ackWaits ~= timeout;
+                pause(); // time passes before the next piece
+                if (pieces.length)
+                {
+                    mock.feed(pieces[0]);
+                    pieces = pieces[1 .. $];
+                }
+                return mock.dataAvailable();
+            }
             cast(void) timeout; // nothing arrives while waiting
             if (userCancel !is null)
             {
@@ -1888,6 +1927,21 @@ version (unittest)
             const e = collectException!ServerException(conn.exec("WAITFOR DELAY '00:01:00'"));
             assert(e !is null && e.sessionLost && !conn.isOpen);
             continue;
+        case Mode.attentionFails: // reported as the timeout's, and the connection is closed (#76)
+            const e = collectException!ConnectionException(conn.exec("WAITFOR DELAY '00:01:00'"));
+            assert(e !is null && e.msg == "The statement ran into the command timeout (1 ms), and the cancel couldn't "
+                    ~ "be sent: Connection reset by peer", e is null ? "no exception" : e.msg);
+            assert(e.next !is null && e.next.msg == "Connection reset by peer");
+            assert(!conn.isOpen);
+            continue;
+        case Mode.trickles: // each wait after data gets the whole 5 seconds again (#77)
+            import core.time : seconds;
+
+            assertThrown!StatementTimeoutException(conn.exec("WAITFOR DELAY '00:01:00'"));
+            assert(server.pieces.length == 0 && server.ackWaits.length >= 2); // the whole answer, over several waits
+            foreach (w; server.ackWaits)
+                assert(w == 5.seconds, w.toString());
+            break;
         }
         assert(server.mock.written[$ - 8 .. $] == [PacketType.attention, 0x01, 0, 8, 0, 0, 1, 0]);
         assert(conn.isOpen && !conn.isBusy);
