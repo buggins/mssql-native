@@ -98,9 +98,9 @@ struct ConnectionOptions
     no limit. When it runs out, the statement is cancelled (an attention
     request) and `StatementTimeoutException` is thrown; the connection stays
     usable. If the statement had ended before the server saw the cancel, its
-    result counts and no exception is thrown. If the server doesn't
-    acknowledge the cancel within 5 seconds, the connection is closed
-    (`ConnectionException`). Unlike `receiveTimeout`, which closes the
+    result counts and no exception is thrown. If the server then sends
+    nothing for 5 seconds, or the cancel can't be sent, the connection is
+    closed (`ConnectionException`). Unlike `receiveTimeout`, which closes the
     connection, this is what ADO.NET's `Command Timeout` does (#68). This is
     the connection's initial value: `Connection.commandTimeout` changes it
     for an open connection, and `Connection.resetSession` restores it (#72).
