@@ -81,6 +81,8 @@ final class Connection : Poolable
     private bool timedOut; // the current request ran into the command timeout: its attention was sent
     private bool timeoutSpent; // the command timeout no longer applies to the current request (a cancel came first)
     private bool responseCompleted; // the response's final DONE came before the attention acknowledgement
+    private Duration commandTimeoutValue; // `commandTimeout`: for the requests that start from now on
+    private Duration requestTimeout; // the command timeout of the current request, taken when it started
     private Duration timeoutLeft; // what is left of the command timeout for the current request
     private bool awaitingAck; // the command timeout ran out with an attention pending: its acknowledgement is due
     private Duration ackLeft; // then: what is left of the 5 seconds for the rest of the response
@@ -122,6 +124,7 @@ final class Connection : Poolable
     this(ConnectionOptions options) @safe
     {
         this.options = options;
+        commandTimeoutValue = options.commandTimeout;
         connect();
     }
 
@@ -133,6 +136,26 @@ final class Connection : Poolable
     this(string connectionString) @safe
     {
         this(ConnectionOptions.parse(connectionString));
+    }
+
+    /++
+    The command timeout of the requests that start from now on
+    (`ConnectionOptions.commandTimeout` until changed); `Duration.zero` or
+    less: no limit. A request that is running keeps the timeout it started
+    with. `resetSession` (a connection pool, on release and on acquire)
+    restores the value of the options, so one borrower's setting doesn't
+    carry over to the next (#72). Like every call except `cancel()`, use it
+    from the thread or task that uses the connection.
+    +/
+    @property Duration commandTimeout() const @safe pure nothrow @nogc
+    {
+        return commandTimeoutValue;
+    }
+
+    /// ditto
+    @property void commandTimeout(Duration timeout) @safe pure nothrow @nogc
+    {
+        commandTimeoutValue = timeout;
     }
 
     /// Whether the connection is open (it may be busy).
@@ -661,7 +684,7 @@ final class Connection : Poolable
         import core.atomic : atomicLoad;
         import core.time : seconds;
 
-        if (options.commandTimeout <= Duration.zero || state != State.busy || !requestSent || timeoutSpent)
+        if (requestTimeout <= Duration.zero || state != State.busy || !requestSent || timeoutSpent)
             return;
         if (!awaitingAck)
         {
@@ -758,12 +781,14 @@ final class Connection : Poolable
     Resets the session with the next request, as a fresh login would leave it:
     temporary tables, `SET` options, the isolation level and an open
     transaction (rolled back) are dropped, and the database and language
-    return to the login's. Used by connection pools; costs no round trip.
+    return to the login's. `commandTimeout` returns to the options' value.
+    Used by connection pools; costs no round trip.
     +/
     void resetSession() @safe
     {
         checkOpen();
         resetPending = true;
+        commandTimeoutValue = options.commandTimeout;
         // as the session will be after the reset
         transactionDescriptor = 0;
         currentDatabase = loginDatabase;
@@ -920,7 +945,7 @@ final class Connection : Poolable
             messageError = null;
             if (wasTimeout)
                 throw new StatementTimeoutException("The statement was cancelled: no data from the server within the "
-                        ~ "command timeout (" ~ options.commandTimeout.toString() ~ ")");
+                        ~ "command timeout (" ~ requestTimeout.toString() ~ ")");
             return true;
         }
         if (done.more || done.token == TokenType.doneInProc)
@@ -1193,7 +1218,8 @@ final class Connection : Poolable
             errorsAtAttention = 0;
             responseCompleted = false;
             lastCancelled = false;
-            timeoutLeft = options.commandTimeout;
+            requestTimeout = commandTimeoutValue;
+            timeoutLeft = requestTimeout;
             requestNumber++;
         }
     }
@@ -1826,7 +1852,7 @@ version (unittest)
         ConnectionOptions options;
         options.user = "sa";
         options.encrypt = false;
-        options.commandTimeout = 1.msecs;
+        options.commandTimeout = mode == Mode.acknowledges ? Duration.zero : 1.msecs;
         Transport factory(string, ushort, Duration)
         {
             return server;
@@ -1834,6 +1860,11 @@ version (unittest)
 
         options.transportFactory = &factory;
         auto conn = new Connection(options);
+        if (mode == Mode.acknowledges) // set on the connection (#72)
+        {
+            assert(conn.commandTimeout == Duration.zero);
+            conn.commandTimeout = 1.msecs;
+        }
         if (mode == Mode.userCancel || mode == Mode.userCancelUnanswered)
             server.userCancel = &conn.cancel;
         final switch (mode)

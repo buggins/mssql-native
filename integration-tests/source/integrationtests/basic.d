@@ -1,6 +1,7 @@
 /// Connection, batches, results and errors (M1).
 module integrationtests.basic;
 
+import std.algorithm.searching : canFind;
 import std.conv : to;
 import std.exception : assertThrown, collectException, enforce;
 import std.format : format;
@@ -282,6 +283,54 @@ void testCommandTimeout()
     // query(): the timeout comes while the result waits for its first row
     auto q = collectException!StatementTimeoutException(conn.query("WAITFOR DELAY '00:00:05'; SELECT 1").empty);
     enforce(q !is null && !conn.isBusy && scalar(conn, "SELECT 3") == "3", "query timeout");
+}
+
+/// The command timeout set on the connection applies from the next request; resetSession restores the options'
+/// value (#72).
+void testCommandTimeoutProperty()
+{
+    import core.time : Duration, MonoTime, msecs, seconds;
+
+    auto conn = connectToServer();
+    scope (exit)
+        conn.close();
+    enforce(conn.commandTimeout == Duration.zero, "a timeout without the option");
+    conn.commandTimeout = 3.seconds;
+    const start = MonoTime.currTime;
+    auto e = collectException!StatementTimeoutException(conn.exec("WAITFOR DELAY '00:00:06'"));
+    enforce(e !is null && MonoTime.currTime - start < 5.seconds, "no timeout from the property");
+    enforce(e.msg.canFind("3 secs"), e.msg);
+
+    // a result being read keeps the timeout it started with
+    void readAll(QueryResult rows)
+    {
+        do
+            while (rows.next())
+            {
+            }
+        while (rows.nextResult());
+    }
+
+    auto rows = conn.queryMultiple("SELECT 1; WAITFOR DELAY '00:00:01'; SELECT 2");
+    enforce(rows.next(), "no first row");
+    conn.commandTimeout = 500.msecs;
+    enforce(collectException!StatementTimeoutException(readAll(rows)) is null,
+            "the new timeout applied to the running request");
+    enforce(collectException!StatementTimeoutException(conn.exec("WAITFOR DELAY '00:00:02'")) !is null,
+            "the new timeout didn't apply to the next request");
+
+    conn.resetSession();
+    enforce(conn.commandTimeout == Duration.zero, "resetSession kept the borrower's timeout");
+    conn.exec("WAITFOR DELAY '00:00:01'");
+
+    // resetSession restores the option's value, not zero
+    auto withOption = connectToServer("command_timeout=1");
+    scope (exit)
+        withOption.close();
+    enforce(withOption.commandTimeout == 1.seconds, "the option's timeout");
+    withOption.commandTimeout = Duration.zero;
+    withOption.resetSession();
+    enforce(withOption.commandTimeout == 1.seconds, "resetSession didn't restore the option's timeout");
 }
 
 /// A session killed while it runs a statement: error 596 (`sessionLost`), the connection is closed and no longer

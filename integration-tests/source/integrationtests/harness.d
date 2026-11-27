@@ -47,6 +47,7 @@ immutable TestCase[] allTests = [
     TestCase("busy connection and closed results", &testBusy, true),
     TestCase("receive timeout", &testReceiveTimeout, true),
     TestCase("command timeout", &testCommandTimeout, true),
+    TestCase("command timeout property", &testCommandTimeoutProperty, true),
     TestCase("session killed while running", &testKilledWhileRunning, true),
     TestCase("text of every type matches the server", &testTextMatchesServer, true),
     TestCase("datetime and smalldatetime rounding", &testDatetimeRounding, true),

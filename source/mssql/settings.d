@@ -101,7 +101,9 @@ struct ConnectionOptions
     result counts and no exception is thrown. If the server doesn't
     acknowledge the cancel within 5 seconds, the connection is closed
     (`ConnectionException`). Unlike `receiveTimeout`, which closes the
-    connection, this is what ADO.NET's `Command Timeout` does (#68).
+    connection, this is what ADO.NET's `Command Timeout` does (#68). This is
+    the connection's initial value: `Connection.commandTimeout` changes it
+    for an open connection, and `Connection.resetSession` restores it (#72).
     +/
     Duration commandTimeout;
 
