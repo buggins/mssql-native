@@ -6,6 +6,10 @@ All notable changes to mssql-native are documented here. The format follows
 
 ## Unreleased
 
+## 0.4.1 — 2026-11-27
+
+The command timeout can be changed on an open connection (#72).
+
 ### Added
 
 - `Connection.commandTimeout`: the command timeout can be changed on an open
